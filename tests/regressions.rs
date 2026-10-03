@@ -90,3 +90,31 @@ fn cfg_test_skips_all_item_kinds() {
     let all = cargo_strata::scan::scan_source(src, false, false).unwrap();
     assert_eq!(all.refs.len(), 8);
 }
+
+/// An item macro whose body is not a list of items (`m! { crate::a::B => 1 }`)
+/// is still scanned for `crate::` chains; one that is (`cfg_x! { mod a; }`)
+/// contributes its `mod` declarations at the position it is written.
+#[test]
+fn item_macro_bodies() {
+    use cargo_strata::scan::scan_source;
+    let s = scan_source(
+        "mod top;\ncfg_x! {\n    mod a;\n    mod b {\n        mod c;\n    }\n}\nm! { crate::a::B => 1 }\n",
+        false,
+        true,
+    )
+    .unwrap();
+    let decls: Vec<(String, Vec<String>)> = s
+        .decls
+        .iter()
+        .map(|d| (d.name.clone(), d.inline.clone()))
+        .collect();
+    assert!(decls.contains(&("top".into(), vec![])), "{decls:?}");
+    assert!(decls.contains(&("a".into(), vec![])), "{decls:?}");
+    assert!(decls.contains(&("c".into(), vec!["b".into()])), "{decls:?}");
+    assert_eq!(s.inline_mods, vec![vec!["b".to_string()]]);
+    assert!(
+        s.refs
+            .iter()
+            .any(|r| r.segs == ["crate", "a", "B"] && r.line == 8)
+    );
+}
