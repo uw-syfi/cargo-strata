@@ -23,8 +23,48 @@ pub struct Outcome {
     pub errors: usize,
 }
 
+/// True for a message from the Rust parser (`... parse error: 12:5: ...`, or
+/// a `verus!` body), as opposed to a size or nesting limit or an I/O error.
+pub fn is_syntax_error(msg: &str) -> bool {
+    let Some((_, rest)) = msg.split_once("parse error: ") else {
+        return false;
+    };
+    let rest = rest.strip_prefix("verus! body: ").unwrap_or(rest);
+    let mut it = rest.splitn(3, ':');
+    let num =
+        |s: Option<&str>| s.is_some_and(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()));
+    num(it.next()) && num(it.next())
+}
+
+impl Outcome {
+    /// Record a read or parse failure. A syntax error is a warning that the
+    /// file was skipped (nightly-only syntax that `syn` rejects must not stop
+    /// a run) unless `strict`; limits and read errors are always errors.
+    fn parse_failure(&mut self, msg: String, strict: bool) {
+        if !strict && is_syntax_error(&msg) {
+            let w = format!("{msg} (file skipped; `--strict` makes this an error)");
+            if !self.warnings.contains(&w) {
+                self.warnings.push(w);
+            }
+        } else {
+            self.lines.push(format!("error[parse]: {msg}"));
+            self.errors += 1;
+        }
+    }
+}
+
 /// Run all checks for the workspace whose manifest is `manifest` (or the cwd's).
 pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcome, String> {
+    run_with(manifest, config_path, false)
+}
+
+/// As [`run`]; with `strict`, a file the parser rejects is an error
+/// (`error[parse]`, exit 2) instead of a warning.
+pub fn run_with(
+    manifest: Option<&Path>,
+    config_path: Option<&Path>,
+    strict: bool,
+) -> Result<Outcome, String> {
     let mut cmd = MetadataCommand::new();
     if let Some(m) = manifest {
         cmd.manifest_path(m);
@@ -97,8 +137,7 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
         out.violations += 1;
     }
     for e in lint.errors {
-        out.lines.push(format!("error[parse]: {e}"));
-        out.errors += 1;
+        out.parse_failure(e, strict);
     }
 
     if !VERUS_FEATURE && cfg.crates.iter().any(|r| r.verus) {
@@ -162,8 +201,7 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
             out.violations += 1;
         }
         for e in rep.errors {
-            out.lines.push(format!("error[parse]: {e}"));
-            out.errors += 1;
+            out.parse_failure(e, strict);
         }
         out.warnings.extend(rep.warnings);
         for u in rep.unknown.into_iter().filter(|_| !cfg.allow_unknown_names) {
@@ -192,7 +230,7 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
             out.errors += 1;
         }
     }
-    surface_check(&meta, &cfg, &ws_root, &lines, &cfg_name, &mut out);
+    surface_check(&meta, &cfg, &ws_root, &lines, &cfg_name, strict, &mut out);
     Ok(out)
 }
 
@@ -203,6 +241,7 @@ fn surface_check(
     ws_root: &Path,
     lines: &validate::Lines,
     cfg_name: &str,
+    strict: bool,
     out: &mut Outcome,
 ) {
     use std::collections::{BTreeSet, HashMap};
@@ -249,8 +288,7 @@ fn surface_check(
         let (files, known, rep) = modules::scan_crate(&roots_of(pkg), verus, cfg.skip_cfg_test);
         for e in rep.errors {
             if seen_errors.insert(e.clone()) {
-                out.lines.push(format!("error[parse]: {e}"));
-                out.errors += 1;
+                out.parse_failure(e, strict);
             }
         }
         scans.insert(pkg.name.to_string(), (files, known));
