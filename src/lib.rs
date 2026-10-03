@@ -133,6 +133,23 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
             .collect();
         let rep = modules::check_crate(&pkg.name, &roots, &rules, &cfg, VERUS_FEATURE, &ws_root);
         for v in rep.violations {
+            if v.stale {
+                let line = lines
+                    .find_module(&pkg.name, &v.from)
+                    .or_else(|| {
+                        rules
+                            .iter()
+                            .find_map(|r| lines.find_module(&r.name, &v.from))
+                    })
+                    .map(|t| lines.item_line(t, "exempt", &v.to))
+                    .unwrap_or(0);
+                out.lines.push(format!(
+                    "error[module]: {cfg_name}:{line}: crate `{}`: module `{}`: stale exemption of `{}`: it suppresses no reference; delete it",
+                    pkg.name, v.from, v.to
+                ));
+                out.violations += 1;
+                continue;
+            }
             out.lines.push(format!(
                 "error[module]: {}:{}: module `{}` references `{}` (via `{}`): {}",
                 v.file.display(),

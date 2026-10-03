@@ -178,3 +178,24 @@ fn public_module_names_must_exist() {
     );
     assert!(!e.contains("`m`, which"), "{e}");
 }
+
+#[test]
+fn stale_module_exemption_names_its_line() {
+    // `m` references nothing, so its exemption of `n` suppresses nothing.
+    let e = err(
+        "[[crate]]\nname = \"a\"\n\n[[crate.module]]\npath = \"m\"\ndeny = [\"n\"]\nexempt = [\"n\"]\n",
+    );
+    assert!(
+        e.contains(":7: crate `a`: module `m`: stale exemption of `n`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn exempt_names_must_be_modules() {
+    let e = err("[[crate]]\nname = \"a\"\n\n[[crate.module]]\npath = \"m\"\nexempt = [\"gone\"]\n");
+    assert!(
+        e.contains("`exempt` names `gone`, which is not a module"),
+        "{e}"
+    );
+}

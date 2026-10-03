@@ -337,6 +337,11 @@ pub struct ModuleRule {
     /// Modules this module must never reference.
     #[serde(default)]
     pub deny: Vec<String>,
+    /// Modules this module may reference although `deny` or `depends_on`
+    /// would reject them (a grandfathered edge). An entry that suppresses no
+    /// violation is reported as stale.
+    #[serde(default)]
+    pub exempt: Vec<String>,
 }
 
 pub fn glob_match(pat: &str, name: &str) -> bool {

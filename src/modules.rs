@@ -15,6 +15,9 @@ pub struct ModViolation {
     pub to: String,
     pub reference: String,
     pub reason: String,
+    /// A stale `exempt` entry (`to` is the exempted module, `from` the rule's
+    /// module, `line` and `reference` are unset).
+    pub stale: bool,
 }
 
 /// A module name in the config that names no module of the crate.
@@ -22,7 +25,7 @@ pub struct ModViolation {
 pub struct UnknownModule {
     /// `path` of the rule it appears in.
     pub rule: String,
-    /// `"path"`, `"depends_on"` or `"deny"`.
+    /// `"path"`, `"depends_on"`, `"deny"` or `"exempt"`.
     pub key: &'static str,
     pub name: String,
 }
@@ -236,6 +239,7 @@ pub fn check_crate(
         for (key, list) in [
             ("depends_on", m.depends_on.as_deref().unwrap_or(&[])),
             ("deny", &m.deny[..]),
+            ("exempt", &m.exempt[..]),
         ] {
             for n in list {
                 if !is_known(n) {
@@ -289,6 +293,7 @@ pub fn observe_crate(
             path: k.join("::"),
             depends_on: Some(vec![]),
             deny: vec![],
+            exempt: vec![],
         })
         .collect();
     let refs: Vec<&ModuleRule> = rules.iter().collect();
@@ -376,14 +381,16 @@ pub fn evaluate_with(
             ));
         }
     }
+    let mut used: HashSet<(usize, usize)> = HashSet::new();
     for f in files {
         let bare: &[crate::scan::RawRef] = if table.is_some() { &f.scan.bare } else { &[] };
         for r in f.scan.refs.iter().chain(bare) {
             let cur = [&f.module[..], &r.inline[..]].concat();
-            let Some((_, src_rule)) = parsed
+            let Some((src_idx, (_, src_rule))) = parsed
                 .iter()
-                .filter(|(p, _)| is_prefix(p, &cur))
-                .max_by_key(|(p, _)| p.len())
+                .enumerate()
+                .filter(|(_, (p, _))| is_prefix(p, &cur))
+                .max_by_key(|(_, (p, _))| p.len())
             else {
                 continue;
             };
@@ -420,6 +427,20 @@ pub fn evaluate_with(
                     } else {
                         None
                     };
+                if reason.is_some() {
+                    // An exemption covers the reference; every matching entry
+                    // counts as used so staleness never depends on order.
+                    let mut exempted = false;
+                    for (i, e) in src_rule.exempt.iter().enumerate() {
+                        if is_prefix(&split(e), &target) {
+                            used.insert((src_idx, i));
+                            exempted = true;
+                        }
+                    }
+                    if exempted {
+                        continue;
+                    }
+                }
                 if let Some(reason) = reason {
                     let rel = f
                         .file
@@ -438,8 +459,25 @@ pub fn evaluate_with(
                         } else {
                             format!("{reason} (the name resolves to `{}`)", target.join("::"))
                         },
+                        stale: false,
                     });
                 }
+            }
+        }
+    }
+    for (idx, (_, m)) in parsed.iter().enumerate() {
+        for (i, e) in m.exempt.iter().enumerate() {
+            if !used.contains(&(idx, i)) {
+                rep.violations.push(ModViolation {
+                    krate: krate.to_string(),
+                    file: PathBuf::new(),
+                    line: 0,
+                    from: m.path.clone(),
+                    to: e.clone(),
+                    reference: String::new(),
+                    reason: "stale exemption: no reference it suppresses".to_string(),
+                    stale: true,
+                });
             }
         }
     }

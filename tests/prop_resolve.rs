@@ -422,9 +422,9 @@ proptest! {
         let mut r = Rng(dseed | 1);
         let denied: Vec<P> = s.mods.iter().filter(|_| r.chance(1, 3)).cloned().collect();
         let rule = if use_depends {
-            ModuleRule { path: "p".into(), depends_on: Some(denied.iter().map(|d| d.join("::")).collect()), deny: vec![] }
+            ModuleRule { path: "p".into(), depends_on: Some(denied.iter().map(|d| d.join("::")).collect()), deny: vec![], exempt: vec![] }
         } else {
-            ModuleRule { path: "p".into(), depends_on: None, deny: denied.iter().map(|d| d.join("::")).collect() }
+            ModuleRule { path: "p".into(), depends_on: None, deny: denied.iter().map(|d| d.join("::")).collect(), exempt: vec![] }
         };
         let probe_mod = p(&["p"]);
         let hits = |m: &P| -> bool { denied.iter().any(|d| is_prefix(d, m)) };
