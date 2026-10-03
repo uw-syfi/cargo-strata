@@ -314,6 +314,14 @@ pub struct CrateRule {
     /// inside `verus! { }`.
     #[serde(default)]
     pub verus_only: bool,
+    /// Modules of this crate (paths from the crate root) through which other
+    /// workspace crates may name its items. A path from a dependent crate
+    /// whose module is neither the crate root nor listed here is a violation
+    /// (`error[surface]`). Absent: no rule.
+    pub public_modules: Option<Vec<String>>,
+    /// Crate-name globs of the dependent crates `public_modules` applies to.
+    /// Absent: every workspace crate that depends on this one.
+    pub public_modules_for: Option<Vec<String>>,
     #[serde(default, rename = "module")]
     pub modules: Vec<ModuleRule>,
 }

@@ -7,6 +7,7 @@ pub mod lints;
 pub mod modules;
 pub mod resolve;
 pub mod scan;
+pub mod surface;
 pub mod validate;
 
 use cargo_metadata::MetadataCommand;
@@ -174,7 +175,144 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
             out.errors += 1;
         }
     }
+    surface_check(&meta, &cfg, &ws_root, &lines, &cfg_name, &mut out);
     Ok(out)
+}
+
+/// `public_modules`: paths from dependent workspace crates into a crate.
+fn surface_check(
+    meta: &cargo_metadata::Metadata,
+    cfg: &config::Config,
+    ws_root: &Path,
+    lines: &validate::Lines,
+    cfg_name: &str,
+    out: &mut Outcome,
+) {
+    use std::collections::{BTreeSet, HashMap};
+    let members: std::collections::HashSet<_> = meta.workspace_members.iter().collect();
+    let pkgs: Vec<&cargo_metadata::Package> = meta
+        .packages
+        .iter()
+        .filter(|p| members.contains(&p.id))
+        .collect();
+    let roots_of = |pkg: &cargo_metadata::Package| -> Vec<PathBuf> {
+        pkg.targets
+            .iter()
+            .filter(|t| {
+                t.kind.iter().any(|k| {
+                    matches!(
+                        k.to_string().as_str(),
+                        "lib" | "proc-macro" | "bin" | "rlib"
+                    )
+                })
+            })
+            .map(|t| t.src_path.clone().into())
+            .collect()
+    };
+    let rules_of = |name: &str| -> Vec<&config::CrateRule> {
+        cfg.crates
+            .iter()
+            .filter(|r| config::glob_match(&r.name, name))
+            .collect()
+    };
+    type Scans = HashMap<
+        String,
+        (
+            Vec<modules::FileScan>,
+            std::collections::HashSet<Vec<String>>,
+        ),
+    >;
+    let mut scans: Scans = HashMap::new();
+    let mut seen_errors: BTreeSet<String> = BTreeSet::new();
+    let mut scan = |pkg: &cargo_metadata::Package, scans: &mut Scans, out: &mut Outcome| {
+        if scans.contains_key(&*pkg.name) {
+            return;
+        }
+        let verus = VERUS_FEATURE && rules_of(&pkg.name).iter().any(|r| r.verus);
+        let (files, known, rep) = modules::scan_crate(&roots_of(pkg), verus, cfg.skip_cfg_test);
+        for e in rep.errors {
+            if seen_errors.insert(e.clone()) {
+                out.lines.push(format!("error[parse]: {e}"));
+                out.errors += 1;
+            }
+        }
+        scans.insert(pkg.name.to_string(), (files, known));
+    };
+    for target in &pkgs {
+        let rules = rules_of(&target.name);
+        let mut public: Vec<String> = Vec::new();
+        let mut any = false;
+        let mut only: Option<Vec<String>> = None;
+        for r in &rules {
+            if let Some(p) = &r.public_modules {
+                any = true;
+                public.extend(p.iter().cloned());
+                if let Some(f) = &r.public_modules_for {
+                    only.get_or_insert_with(Vec::new).extend(f.iter().cloned());
+                }
+            }
+        }
+        if !any {
+            continue;
+        }
+        scan(target, &mut scans, out);
+        let known = scans[&*target.name].1.clone();
+        if !cfg.allow_unknown_names {
+            for r in rules.iter().filter(|r| r.public_modules.is_some()) {
+                for n in r.public_modules.iter().flatten() {
+                    let path: Vec<String> = n
+                        .split("::")
+                        .filter(|s| !s.is_empty() && *s != "crate")
+                        .map(str::to_string)
+                        .collect();
+                    if !known.contains(&path) {
+                        let line = lines
+                            .find("crate", "name", &r.name)
+                            .map(|t| lines.item_line(t, "public_modules", n))
+                            .unwrap_or(0);
+                        out.lines.push(format!(
+                            "error[config]: {cfg_name}:{line}: crate `{}`: public_modules names `{n}`, which is not a module",
+                            target.name
+                        ));
+                        out.errors += 1;
+                    }
+                }
+            }
+        }
+        let ident = target.name.replace('-', "_");
+        for user in &pkgs {
+            if user.id == target.id
+                || !user.dependencies.iter().any(|d| d.name == *target.name)
+                || only
+                    .as_ref()
+                    .is_some_and(|o| !o.iter().any(|g| config::glob_match(g, &user.name)))
+            {
+                continue;
+            }
+            scan(user, &mut scans, out);
+            let (files, _) = &scans[&*user.name];
+            let units: Vec<modules::ModuleUnit> = files
+                .iter()
+                .map(|f| modules::ModuleUnit {
+                    file: f.file.clone(),
+                    module: f.module.clone(),
+                    scan: &f.scan,
+                })
+                .collect();
+            for v in surface::evaluate(&ident, &public, &known, &units, ws_root) {
+                out.lines.push(format!(
+                    "error[surface]: {}:{}: `{}` names `{}` of `{}` (via `{}`), which is not in its public_modules",
+                    v.file.display(),
+                    v.line,
+                    user.name,
+                    v.module,
+                    target.name,
+                    v.reference
+                ));
+                out.violations += 1;
+            }
+        }
+    }
 }
 
 /// Config text describing the workspace as it is now (`cargo strata init`).

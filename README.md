@@ -203,6 +203,7 @@ their rules combine.
 | `unsafe` | `"ratchet"`: count `unsafe` blocks, fns, impls, traits and extern blocks in `src/`; it must equal the `unsafe_ratchet` entry (more: justify and raise; fewer: lower it; no entry and stale entries are errors). `"forbid"`: every lib and bin root carries `#![forbid(unsafe_code)]` (`error[unsafe]`) |
 | `verus_only` | Every item in `src/` must be a `use`, `mod`, `extern crate` or inside `verus! { }` (`error[verus-only]`) |
 | `[crate.main]` | `calls`, `methods`, `entries`: `fn main` in this crate's binaries may call only these paths (segments joined by `::`, bare names allowed), these methods, and the entries; at least one entry call in total, each at most once (`error[main]`). `items` (globs over `kind name`, such as `mod neg`, `fn helper`, `use`, `impl`): when present, each binary root may hold only `fn main`, inner attributes and top-level items matching one of them |
+| `public_modules`, `public_modules_for` | Public surface: a path from another workspace crate into this one may reach only the crate root or these modules (exact, not their submodules); anything else is `error[surface]`. `public_modules_for` (crate-name globs) limits it to those dependents, default every dependent. See [Public surface](#public-surface) |
 | `[[crate.module]]` | Module rules, below |
 
 ### `[[crate.module]]`
@@ -242,6 +243,34 @@ path = "memory"
 depends_on = ["util"]
 deny = ["engine"]
 ```
+
+### Public surface
+
+`public_modules` on a crate limits how its dependents name its items. For each
+path in a dependent's source that starts with this crate's name (`use` leaves,
+globs, expression, type and pattern paths, `verus!` bodies), the module is the
+longest prefix of the rest of the path that names a module of this crate. The
+path is allowed if that module is the crate root or is listed exactly; items
+after the module are not checked.
+
+```toml
+[[crate]]
+name = "core"
+public_modules = ["memory", "memory::api"]   # `core::memory::api::Slot`, not `core::memory::slab::Slot`
+public_modules_for = ["app-*"]               # only these dependents
+```
+
+```
+error[surface]: app/src/lib.rs:7: `app` names `memory::slab` of `core` (via `core::memory::slab::Slot`), which is not in its public_modules
+```
+
+Limits: names are matched as the package name with `-` as `_` (a `[lib] name`
+or a dependency rename is not followed); the namespace-blind module test means
+`use core::memory::slab;` is a module path even when `slab` is also an item;
+paths inside macros other than `verus!` are seen only when they start with
+`crate`, `self` or `super`; only the crates' `mod` trees are scanned, not
+tests or examples. An unknown name in `public_modules` is a configuration
+error.
 
 ### `[[authority]]`
 
