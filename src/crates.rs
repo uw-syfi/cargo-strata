@@ -273,23 +273,21 @@ pub fn evaluate(
     }
 
     for (axis, key, required) in [
-        (&cfg.layers, "layer", cfg.require_layer),
-        (&cfg.groups, "group", cfg.require_group),
+        (&cfg.layers, "layer", &cfg.require_layer),
+        (&cfg.groups, "group", &cfg.require_group),
     ] {
-        if required {
-            for (name, manifest) in workspace {
-                if axis_of(axis, name).is_none() {
-                    out.push((
-                        Edge {
-                            from: name.clone(),
-                            to: String::new(),
-                            kind: "normal",
-                            manifest: manifest.clone(),
-                            optional: false,
-                        },
-                        format!("crate belongs to no `{key}`"),
-                    ));
-                }
+        for (name, manifest) in workspace {
+            if required.covers(name) && axis_of(axis, name).is_none() {
+                out.push((
+                    Edge {
+                        from: name.clone(),
+                        to: String::new(),
+                        kind: "normal",
+                        manifest: manifest.clone(),
+                        optional: false,
+                    },
+                    format!("crate belongs to no `{key}`"),
+                ));
             }
         }
     }

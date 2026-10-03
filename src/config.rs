@@ -34,12 +34,13 @@ pub struct Config {
     /// Apply the group axis to dev edges too (default true).
     #[serde(default = "yes")]
     pub group_dev: bool,
-    /// Every workspace crate must belong to a layer.
+    /// Every workspace crate (`true`), or every one matching these globs,
+    /// must belong to a layer.
     #[serde(default)]
-    pub require_layer: bool,
-    /// Every workspace crate must belong to a group.
+    pub require_layer: Require,
+    /// The same for groups.
     #[serde(default)]
-    pub require_group: bool,
+    pub require_group: Require,
     /// Layers, ordered lowest first unless `may_depend_on` is given.
     #[serde(default, rename = "layer")]
     pub layers: Vec<Layer>,
@@ -144,6 +145,51 @@ fn star() -> Vec<String> {
 }
 fn dot() -> Vec<String> {
     vec![".".into()]
+}
+
+/// Which workspace crates must belong to a layer (or group): none, all
+/// (`true`), or those matching a list of crate-name globs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "RequireRepr")]
+pub enum Require {
+    #[default]
+    None,
+    All,
+    Crates(Vec<String>),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequireRepr {
+    Flag(bool),
+    Crates(Vec<String>),
+}
+
+impl From<RequireRepr> for Require {
+    fn from(r: RequireRepr) -> Self {
+        match r {
+            RequireRepr::Flag(false) => Require::None,
+            RequireRepr::Flag(true) => Require::All,
+            RequireRepr::Crates(g) => Require::Crates(g),
+        }
+    }
+}
+
+impl From<bool> for Require {
+    fn from(b: bool) -> Self {
+        RequireRepr::Flag(b).into()
+    }
+}
+
+impl Require {
+    /// Whether crate `name` must belong to the axis.
+    pub fn covers(&self, name: &str) -> bool {
+        match self {
+            Require::None => false,
+            Require::All => true,
+            Require::Crates(g) => g.iter().any(|p| glob_match(p, name)),
+        }
+    }
 }
 
 /// `fn main` may call only what is listed here.

@@ -3,7 +3,7 @@
 //! the implementation.
 #![allow(clippy::nonminimal_bool, clippy::needless_range_loop)] // oracles are written to mirror the spec, not minimized
 
-use cargo_strata::config::{Config, CrateRule, Layer};
+use cargo_strata::config::{Config, CrateRule, Layer, Require, glob_match};
 use cargo_strata::crates::{Edge, evaluate};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -219,14 +219,19 @@ pub fn oracle(cfg: &Config, ws: &[String], edges: &[Edge]) -> BTreeSet<Key> {
         }
     }
     for (axis, tag, req) in [
-        (&cfg.layers, "require_layer", cfg.require_layer),
-        (&cfg.groups, "require_group", cfg.require_group),
+        (&cfg.layers, "require_layer", &cfg.require_layer),
+        (&cfg.groups, "require_group", &cfg.require_group),
     ] {
-        if req {
-            for w in ws {
-                if member(axis, w).is_none() {
-                    out.insert(k(tag, w, "", "normal"));
-                }
+        // As documented: `true` covers every workspace crate, a list the
+        // crates matching one of its globs.
+        let covered = |w: &str| match req {
+            Require::None => false,
+            Require::All => true,
+            Require::Crates(g) => g.iter().any(|p| glob_match(p, w)),
+        };
+        for w in ws {
+            if covered(w) && member(axis, w).is_none() {
+                out.insert(k(tag, w, "", "normal"));
             }
         }
     }
@@ -354,6 +359,8 @@ fn crate_rule() -> impl Strategy<Value = CrateRule> {
 #[derive(Debug, Clone)]
 pub struct Case {
     pub cfg_flags: [bool; 7],
+    /// `require_layer` / `require_group` as glob lists; `None` uses the flag.
+    pub require: [Option<Vec<String>>; 2],
     pub layers: Vec<Layer>,
     pub groups: Vec<Layer>,
     pub rules: Vec<CrateRule>,
@@ -362,7 +369,10 @@ pub struct Case {
 
 fn case() -> impl Strategy<Value = Case> {
     (
-        prop::array::uniform7(any::<bool>()),
+        (
+            prop::array::uniform7(any::<bool>()),
+            prop::array::uniform2(prop::option::of(glob_list(2))),
+        ),
         axis("L"),
         axis("G"),
         prop::collection::vec(crate_rule(), 0..5),
@@ -376,13 +386,16 @@ fn case() -> impl Strategy<Value = Case> {
             0..24,
         ),
     )
-        .prop_map(|(cfg_flags, layers, groups, rules, edges)| Case {
-            cfg_flags,
-            layers,
-            groups,
-            rules,
-            edges,
-        })
+        .prop_map(
+            |((cfg_flags, require), layers, groups, rules, edges)| Case {
+                cfg_flags,
+                require,
+                layers,
+                groups,
+                rules,
+                edges,
+            },
+        )
 }
 
 impl Case {
@@ -394,8 +407,8 @@ impl Case {
             check_optional: f[2],
             layer_dev: f[3],
             group_dev: f[4],
-            require_layer: f[5],
-            require_group: f[6],
+            require_layer: self.require[0].clone().map_or(f[5].into(), Require::Crates),
+            require_group: self.require[1].clone().map_or(f[6].into(), Require::Crates),
             skip_cfg_test: true,
             layers: self.layers.clone(),
             groups: self.groups.clone(),
@@ -594,7 +607,17 @@ fn config_toml(c: &Case) -> String {
     let f = c.cfg_flags;
     let mut t = format!(
         "allow_unknown_names = true\ncheck_dev = {}\ncheck_build = {}\ncheck_optional = {}\nlayer_dev = {}\ngroup_dev = {}\nrequire_layer = {}\nrequire_group = {}\n",
-        f[0], f[1], f[2], f[3], f[4], f[5], f[6]
+        f[0],
+        f[1],
+        f[2],
+        f[3],
+        f[4],
+        c.require[0]
+            .as_ref()
+            .map_or(f[5].to_string(), |g| toml_list(g)),
+        c.require[1]
+            .as_ref()
+            .map_or(f[6].to_string(), |g| toml_list(g))
     );
     t += &axis_toml("layer", &c.layers);
     t += &axis_toml("group", &c.groups);
