@@ -202,7 +202,7 @@ their rules combine.
 | `deny_reexport`, `allow_reexport` | A `pub use` (any `pub` visibility) whose path starts with a crate in `deny_reexport` (`-` and `_` equal) may only name leaves listed in `allow_reexport`; a glob always fails; `allow_reexport = ["*"]` lifts the rule (`error[reexport]`). The leaf is the original name, so `X as Y` is checked as `X`. With `resolve`, a path that reaches a denied crate through a local alias (`use denied as d; pub use d::X`), a module that re-exports it, or a workspace dependency that re-exports it is checked the same way |
 | `unsafe` | `"ratchet"`: count `unsafe` blocks, fns, impls, traits and extern blocks in `src/`; it must equal the `unsafe_ratchet` entry (more: justify and raise; fewer: lower it; no entry and stale entries are errors). `"forbid"`: every lib and bin root carries `#![forbid(unsafe_code)]` (`error[unsafe]`) |
 | `verus_only` | Every item in `src/` must be a `use`, `mod`, `extern crate` or inside `verus! { }` (`error[verus-only]`) |
-| `[crate.main]` | `calls`, `methods`, `entries`: `fn main` in this crate's binaries may call only these paths (segments joined by `::`, bare names allowed), these methods, and the entries; at least one entry call in total, each at most once (`error[main]`) |
+| `[crate.main]` | `calls`, `methods`, `entries`: `fn main` in this crate's binaries may call only these paths (segments joined by `::`, bare names allowed), these methods, and the entries; at least one entry call in total, each at most once (`error[main]`). `items` (globs over `kind name`, such as `mod neg`, `fn helper`, `use`, `impl`): when present, each binary root may hold only `fn main`, inner attributes and top-level items matching one of them |
 | `[[crate.module]]` | Module rules, below |
 
 ### `[[crate.module]]`
@@ -427,6 +427,9 @@ testing without `cargo metadata` or the file system.
   (use groups, renames, globs, `self`/`super` chains, inline and file
   modules, `verus!` bodies, `cfg(test)`); extraction must match exactly, module
   rules must match an oracle. Run with and without `--features verus`.
+* `tests/prop_main_items.rs`: generated binary roots (items with
+  attributes and doc comments around `fn main`) against an oracle for
+  `[crate.main] items`.
 * `tests/prop_lints.rs`: generated files (fn bodies, impls, inline and
   `cfg(test)` modules, macro arguments, `verus!` blocks) with line-exact
   ground truth; fact extraction must match it, and authority, re-export and

@@ -207,6 +207,11 @@ pub struct MainRule {
     /// at most once.
     #[serde(default)]
     pub entries: Vec<String>,
+    /// If present, the binary's root file may hold only `fn main`, inner
+    /// attributes and top-level items whose `kind name` (`mod neg`,
+    /// `use`, `fn helper`) matches one of these globs.
+    #[serde(default)]
+    pub items: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

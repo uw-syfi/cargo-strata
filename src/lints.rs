@@ -456,6 +456,23 @@ fn main_rule(m: &MainRule, f: &FileInfo, out: &mut Vec<LintViolation>) {
             msg,
         })
     };
+    if let Some(allowed) = &m.items {
+        for (line, d) in &f.facts.top_items {
+            if d != "fn main" && !allowed.iter().any(|p| glob_match(p, d)) {
+                push(
+                    *line,
+                    format!(
+                        "top-level `{d}`: a binary root may hold only `fn main` and {}",
+                        if allowed.is_empty() {
+                            "inner attributes".to_string()
+                        } else {
+                            quote(allowed)
+                        }
+                    ),
+                );
+            }
+        }
+    }
     if !f.facts.has_main {
         push(1, "no top-level `fn main`".into());
         return;
