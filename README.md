@@ -98,7 +98,7 @@ re-exports, globs and renames.
 
 ```yaml
 - uses: dtolnay/rust-toolchain@stable
-- run: cargo install cargo-strata --version 0.1.0 --locked
+- run: cargo install cargo-strata --version 0.2.0 --locked
 - run: cargo strata check
 ```
 
