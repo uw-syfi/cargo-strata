@@ -1,0 +1,60 @@
+# External workspaces strata is checked against (tests/corpus/run.py).
+# Only the pinned commit is stored, not the sources.
+
+[[workspace]]
+name = "verus"
+repo = "https://github.com/verus-lang/verus"
+commit = "f319e4d9bd7154cb793bc37ffd90cf8ee8a77bb6"
+manifest = "source/Cargo.toml"
+verus = true
+shape = "verus! heavy; nightly-only syntax in the rustc forks (2 expected parse errors)"
+expected_parse_errors = 2
+
+[[workspace]]
+name = "rust-analyzer"
+repo = "https://github.com/rust-lang/rust-analyzer"
+commit = "cdc4aa0a6142ff7cda91dae5ae373792d81c522c"
+manifest = "Cargo.toml"
+shape = "large workspace, 40+ crates, raw-identifier modules"
+
+[[workspace]]
+name = "tokio"
+repo = "https://github.com/tokio-rs/tokio"
+commit = "86678437268b2a34cc72b3cff6ef2148c75e23af"
+manifest = "Cargo.toml"
+shape = "cfg-gated modules, macros generating items, optional features"
+
+[[workspace]]
+name = "serde"
+repo = "https://github.com/serde-rs/serde"
+commit = "6693a89cca77e0151437da1c7f890090b9ebf04c"
+manifest = "Cargo.toml"
+shape = "proc-macro crates, optional path dependency, build.rs"
+
+[[workspace]]
+name = "ripgrep"
+repo = "https://github.com/BurntSushi/ripgrep"
+commit = "3fce3b5bb0236da2df6d99672afb8a719642eca7"
+manifest = "Cargo.toml"
+shape = "path dependencies, renamed and target-specific dependencies, build.rs"
+
+[[workspace]]
+name = "cargo"
+repo = "https://github.com/rust-lang/cargo"
+commit = "e6faaba5c4c461c818212756bea8681555019b4d"
+manifest = "Cargo.toml"
+shape = "many internal crates, build.rs, cfg(windows)/cfg(unix) modules"
+
+[[workspace]]
+name = "clap"
+repo = "https://github.com/clap-rs/clap"
+commit = "4be56132cf7a5ef6e237409a13225a5829cb24e4"
+manifest = "Cargo.toml"
+shape = "feature-heavy, optional dependencies, proc-macro derive"
+
+[[workspace]]
+name = "wasmtime"
+repo = "https://github.com/bytecodealliance/wasmtime"
+commit = "3be934572ba647c8c925085480ae5670b6faa81f"
+manifest = "Cargo.toml"
+shape = "100 crates, multi-line use trees, build.rs, cfg-gated backends"

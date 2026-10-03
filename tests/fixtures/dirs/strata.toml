@@ -1,0 +1,27 @@
+[[group]]
+name = "framework"
+crates = ["core"]
+dir = "fw"
+
+[[group]]
+name = "misc"
+crates = ["misplaced"]
+dir = "plug"
+
+[[group]]
+name = "plugin"
+crates = ["p1"]
+dir = "plug"
+
+[[layer]]
+name = "bad"
+crates = ["evil"]
+dir = "elsewhere"
+
+[[crate]]
+name = "c*"
+deny_reach_dir = ["banned"]
+
+[[crate]]
+name = "p1"
+deny_reach_dir = ["ext"]

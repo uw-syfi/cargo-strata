@@ -1,0 +1,42 @@
+[package]
+name = "cargo-strata-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+toml = "1.1.6"
+
+[dependencies.cargo-strata]
+path = ".."
+features = ["verus"]
+
+[workspace]
+
+[[bin]]
+name = "scan"
+path = "fuzz_targets/scan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "facts"
+path = "fuzz_targets/facts.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "resolve"
+path = "fuzz_targets/resolve.rs"
+test = false
+doc = false

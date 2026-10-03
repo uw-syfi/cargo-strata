@@ -1,0 +1,7 @@
+[[crate]]
+name = "verusfix"
+verus = true
+
+[[crate.module]]
+path = "memory"
+depends_on = ["util"]

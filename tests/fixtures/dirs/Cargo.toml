@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["fw/core", "fw/misplaced", "plug/p1", "banned/evil"]
+exclude = ["ext"]

@@ -1,0 +1,22 @@
+check_dev = true
+layer_dev = true
+
+[[layer]]
+name = "base"
+crates = ["low"]
+
+[[layer]]
+name = "core"
+crates = ["mid", "peer"]
+
+[[layer]]
+name = "top"
+crates = ["high"]
+
+[[crate]]
+name = "mid"
+deny = ["peer"]
+
+[[crate]]
+name = "peer"
+layer_exempt = ["high"]

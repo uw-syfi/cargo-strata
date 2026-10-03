@@ -1,0 +1,14 @@
+[[crate]]
+name = "modsfix"
+
+[[crate.module]]
+path = "memory"
+depends_on = ["util"]
+
+[[crate.module]]
+path = "engine"
+deny = ["memory::private"]
+
+[[crate.module]]
+path = "util"
+depends_on = []

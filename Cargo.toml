@@ -1,0 +1,29 @@
+[package]
+name = "cargo-strata"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Enforce crate and module dependency rules in a Cargo workspace, with optional Verus support"
+license = "MIT"
+repository = "https://github.com/uw-syfi/cargo-strata"
+readme = "README.md"
+keywords = ["architecture", "dependencies", "lint", "workspace", "verus"]
+categories = ["development-tools", "development-tools::cargo-plugins"]
+exclude = ["fuzz/target", "fuzz/artifacts", "fuzz/corpus", "tests/fixtures/**/target", "tests/fixtures/**/Cargo.lock"]
+
+[dependencies]
+cargo_metadata = "0.23.1"
+glob = "0.3.4"
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+serde_json = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+toml = "1.1.6"
+verus_syn = { version = "0.0.0-2026-09-06-0133", features = ["full", "visit"], optional = true }
+
+[features]
+verus = ["dep:verus_syn"]
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3.27.0"

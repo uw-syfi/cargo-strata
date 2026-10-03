@@ -1,0 +1,10 @@
+[package]
+name = "low"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+high = { path = "../high" }
+
+[dev-dependencies]
+mid = { path = "../mid" }

@@ -1,0 +1,34 @@
+lint_exclude = ["app/tests/broken.rs"]
+unsafe_ratchet = "ratchet.json"
+
+[[authority]]
+name = "Permit"
+type = "Permit"
+assoc = ["new"]
+calls = ["permit"]
+allow = ["gate/src/lib.rs"]
+exempt_marker = "negctl: fails here"
+
+[[crate]]
+name = "app"
+deny_source_dir = ["vendor"]
+deny_reexport = ["effects"]
+allow_reexport = ["device"]
+unsafe = "ratchet"
+
+[[crate]]
+name = "gate"
+unsafe = "forbid"
+
+[[forbid]]
+name = "no raw hint"
+patterns = ["unreachable_unchecked()", "std::hint"]
+allow = []
+crates = ["app"]
+
+[[crate]]
+name = "srv"
+[crate.main]
+calls = ["std::env::args", "Some"]
+methods = ["nth", "unwrap"]
+entries = ["engine::serve"]

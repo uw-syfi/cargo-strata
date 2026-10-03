@@ -1,0 +1,6 @@
+check_optional = false
+
+[[crate]]
+name = "*"
+deny_reach_dir = ["banned"]
+deny = ["b"]

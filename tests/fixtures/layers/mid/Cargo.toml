@@ -1,0 +1,8 @@
+[package]
+name = "mid"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+low = { path = "../low" }
+peer = { path = "../peer" }
