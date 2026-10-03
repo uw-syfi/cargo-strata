@@ -40,6 +40,9 @@ pub struct Scan {
     pub refs: Vec<RawRef>,
     pub decls: Vec<ModDecl>,
     pub verus: Vec<VerusBody>,
+    /// Bodies of item-position macro invocations other than `verus!`
+    /// (`cfg_rt! { pub mod runtime; }`), parsed as items after the file.
+    pub macros: Vec<VerusBody>,
     /// Inline modules declared (`mod x { .. }`), as paths relative to the file.
     pub inline_mods: Vec<Vec<String>>,
     /// Multi-segment paths outside `use` that do not start with `crate`,
@@ -298,6 +301,28 @@ macro_rules! scanner {
                     }
                 }
 
+                fn visit_item_macro(&mut self, i: &'ast $syn::ItemMacro) {
+                    if self.skip_cfg_test && is_cfg_test(&i.attrs) {
+                        return;
+                    }
+                    let verus = i
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == "verus");
+                    if i.ident.is_none() && !verus {
+                        // Parsed as items after the file; if that fails, the
+                        // tokens are scanned for `crate::` chains instead.
+                        self.out.macros.push(VerusBody {
+                            tokens: i.mac.tokens.clone(),
+                            inline: self.inline.clone(),
+                        });
+                        return;
+                    }
+                    $syn::visit::visit_item_macro(self, i);
+                }
+
                 fn visit_macro(&mut self, m: &'ast $syn::Macro) {
                     let last = m
                         .path
@@ -508,6 +533,7 @@ pub fn scan_source(src: &str, parse_verus: bool, skip_cfg_test: bool) -> Result<
         refs,
         decls,
         verus: Vec::new(),
+        macros: Vec::new(),
         inline_mods,
         bare,
         items,
@@ -518,50 +544,91 @@ pub fn scan_source(src: &str, parse_verus: bool, skip_cfg_test: bool) -> Result<
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const SCAN_STACK_BYTES: usize = 1 << 30;
 
+/// Bodies found inside a nested scan, still to be parsed.
+#[derive(Default)]
+struct Pending {
+    verus: Vec<VerusBody>,
+    macros: Vec<VerusBody>,
+}
+
+/// Fold the scan of a nested body (a `verus!` block or a macro's items) into
+/// `out`, as if its items sat inside `inline` in the enclosing file.
+fn merge(out: &mut Scan, mut inner: Scan, inline: &[String], next: &mut Pending) {
+    let prefix = |v: &[String]| [inline, v].concat();
+    out.items
+        .extend_under(inline, std::mem::take(&mut inner.items));
+    for mut r in inner.refs {
+        r.inline = prefix(&r.inline);
+        out.refs.push(r);
+    }
+    for mut r in inner.bare {
+        r.inline = prefix(&r.inline);
+        out.bare.push(r);
+    }
+    for mut d in inner.decls {
+        d.inline = prefix(&d.inline);
+        out.decls.push(d);
+    }
+    for m in inner.inline_mods {
+        out.inline_mods.push(prefix(&m));
+    }
+    for (from, to) in [
+        (inner.verus, &mut next.verus),
+        (inner.macros, &mut next.macros),
+    ] {
+        for mut b in from {
+            b.inline = prefix(&b.inline);
+            to.push(b);
+        }
+    }
+}
+
+/// Nesting of `verus!` blocks and item macros followed (a macro whose body
+/// invokes another).
+const MAX_MACRO_DEPTH: usize = 8;
+
 fn scan_source_inner(src: &str, parse_verus: bool, skip_cfg_test: bool) -> Result<Scan, String> {
     check_shape(src)?;
     let file = syn::parse_file(src).map_err(|e| at(e.span().start(), &e))?;
     let mut out = Scan::default();
     plain::visit_file(&file, &mut out, skip_cfg_test);
     crate::resolve::plain::visit_file(&file, &mut out.items, skip_cfg_test);
-    #[cfg(feature = "verus")]
-    if parse_verus {
-        let bodies = std::mem::take(&mut out.verus);
-        for b in bodies {
-            let f: verus_syn::File = verus_syn::parse2(b.tokens)
-                .map_err(|e| format!("verus! body: {}", at(e.span().start(), &e)))?;
-            let mut inner = Scan::default();
-            verus::visit_file(&f, &mut inner, skip_cfg_test);
-            crate::resolve::verus::visit_file(&f, &mut inner.items, skip_cfg_test);
-            out.items
-                .extend_under(&b.inline, std::mem::take(&mut inner.items));
-            for mut r in inner.refs {
-                let mut inl = b.inline.clone();
-                inl.extend(r.inline);
-                r.inline = inl;
-                out.refs.push(r);
-            }
-            for mut r in inner.bare {
-                let mut inl = b.inline.clone();
-                inl.extend(r.inline);
-                r.inline = inl;
-                out.bare.push(r);
-            }
-            for mut d in inner.decls {
-                let mut inl = b.inline.clone();
-                inl.extend(d.inline);
-                d.inline = inl;
-                out.decls.push(d);
-            }
-            for m in inner.inline_mods {
-                let mut inl = b.inline.clone();
-                inl.extend(m);
-                out.inline_mods.push(inl);
+    let mut pending = Pending {
+        verus: std::mem::take(&mut out.verus),
+        macros: std::mem::take(&mut out.macros),
+    };
+    // Item macros whose body parses as items (`cfg_rt! { pub mod x; }`) are
+    // read as if the items were written in place; any other body is skipped.
+    for _ in 0..MAX_MACRO_DEPTH {
+        if pending.verus.is_empty() && pending.macros.is_empty() {
+            break;
+        }
+        let cur = std::mem::take(&mut pending);
+        #[cfg(feature = "verus")]
+        if parse_verus {
+            for b in cur.verus {
+                let f: verus_syn::File = verus_syn::parse2(b.tokens)
+                    .map_err(|e| format!("verus! body: {}", at(e.span().start(), &e)))?;
+                let mut inner = Scan::default();
+                verus::visit_file(&f, &mut inner, skip_cfg_test);
+                crate::resolve::verus::visit_file(&f, &mut inner.items, skip_cfg_test);
+                merge(&mut out, inner, &b.inline, &mut pending);
             }
         }
+        #[cfg(not(feature = "verus"))]
+        let _ = parse_verus;
+        for b in cur.macros {
+            let Ok(f) = syn::parse2::<syn::File>(b.tokens.clone()) else {
+                scan_tokens(b.tokens, &b.inline, &mut out.refs);
+                continue;
+            };
+            let mut inner = Scan::default();
+            plain::visit_file(&f, &mut inner, skip_cfg_test);
+            crate::resolve::plain::visit_file(&f, &mut inner.items, skip_cfg_test);
+            merge(&mut out, inner, &b.inline, &mut pending);
+        }
     }
-    #[cfg(not(feature = "verus"))]
-    let _ = parse_verus;
     out.verus.clear();
+    out.macros.clear();
     Ok(out)
 }

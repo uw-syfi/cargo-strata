@@ -60,6 +60,7 @@ struct Gen {
     mod_rs: BTreeSet<Path_>,
     counter: usize,
     test_mod: bool,
+    macro_wrap: bool,
     out: Out,
 }
 
@@ -364,6 +365,16 @@ impl Gen {
         self.body(m, file, lines, &vec![], "");
         for c in self.children(m) {
             let name = c.last().unwrap().clone();
+            // Some declarations sit in an item macro (`cfg_m! { mod x; }`),
+            // as in tokio's `cfg_*!` wrappers; a macro may wrap another.
+            let wrap = if self.macro_wrap {
+                self.rng.below(3)
+            } else {
+                0
+            };
+            for _ in 0..wrap {
+                lines.push("cfg_m! {".into());
+            }
             if self.inline.contains(&c) {
                 lines.push(format!("mod {name} {{"));
                 let mut sub_dir = child_dir.to_string();
@@ -385,6 +396,9 @@ impl Gen {
                 };
                 self.file_module(&c, f, cd);
             }
+            for _ in 0..wrap {
+                lines.push("}".into());
+            }
         }
     }
 }
@@ -402,6 +416,7 @@ fn gen_crate(seed: u64, size: usize, test_mod: bool) -> Crate {
         mod_rs: BTreeSet::new(),
         counter: 0,
         test_mod,
+        macro_wrap: true,
         out: Out::default(),
     };
     for _ in 0..8 {
