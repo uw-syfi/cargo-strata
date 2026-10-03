@@ -551,7 +551,7 @@ proptest! {
         let c = gen_crate(seed, size, skip);
         let all: Vec<String> = c.mods.iter().map(|m| mp(m)).collect();
         let rules = c.mods.iter().map(|m| ModuleRule {
-            path: mp(m), depends_on: None, deny: all.clone(),
+            path: mp(m), depends_on: None, deny: all.clone(), exempt: vec![],
         }).collect();
         let dir = tempfile::tempdir().unwrap();
         let (got, errors, warnings) = run_crate(&c, dir.path(), rules, verus_flag, skip);
@@ -587,12 +587,12 @@ proptest! {
             if !seen.insert(key) { continue; }
             let depends_on = rng.chance(1, 2).then(|| (0..rng.below(4)).map(|_| pick(&mut rng)).collect());
             let deny = (0..rng.below(3)).map(|_| pick(&mut rng)).collect();
-            rules.push(ModuleRule { path, depends_on, deny });
+            rules.push(ModuleRule { path, depends_on, deny, exempt: vec![] });
         }
         let norm = |s: &str| -> Path_ { s.split("::").filter(|x| *x != "crate" && !x.is_empty()).map(String::from).collect() };
         let dir = tempfile::tempdir().unwrap();
         let (got, errors, warnings) = run_crate(&c, dir.path(), rules.iter().map(|r| ModuleRule {
-            path: r.path.clone(), depends_on: r.depends_on.clone(), deny: r.deny.clone() }).collect(), false, true);
+            path: r.path.clone(), depends_on: r.depends_on.clone(), deny: r.deny.clone(), exempt: vec![] }).collect(), false, true);
         prop_assert!(errors.is_empty());
         // Oracle.
         let mut want: BTreeSet<Viol> = BTreeSet::new();
@@ -640,7 +640,7 @@ proptest! {
             };
             let depends_on = if has { Some(pick(1, 3)) } else { None };
             let deny = pick(1, 4);
-            rules.push(ModuleRule { path: m.clone(), depends_on, deny });
+            rules.push(ModuleRule { path: m.clone(), depends_on, deny, exempt: vec![] });
         }
         let dir = tempfile::tempdir().unwrap();
         let (base, _, _) = run_crate(&c, dir.path(), rules.clone(), false, true);

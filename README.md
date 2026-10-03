@@ -213,6 +213,7 @@ their rules combine.
 | `path` | Module path from the crate root, `a::b` (a leading `crate::` is allowed) |
 | `depends_on` | If present, the module (and its submodules, unless a more specific rule exists) may reference only itself and these modules (prefix match) |
 | `deny` | Modules it must never reference |
+| `exempt` | Modules it may reference although `deny` or `depends_on` rejects them (a grandfathered edge). An entry that suppresses no reference is reported as stale (`error[module]` with the config line); an unknown name is a configuration error |
 
 Resolution: a reference's target is the longest prefix of its path that names
 a known module; the source is the longest configured rule that is a prefix of
