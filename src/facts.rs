@@ -30,6 +30,10 @@ pub struct Facts {
     pub methods: Vec<(String, usize)>,
     /// The file has a top-level `fn main`.
     pub has_main: bool,
+    /// Every top-level item outside `verus!` bodies: line, `kind name` (`fn main`,
+    /// `mod neg`, `struct S`) or the kind alone for unnamed items (`use`,
+    /// `impl`, `name!` for a macro invocation).
+    pub top_items: Vec<(usize, String)>,
     /// Path and bare calls inside the body of top-level `fn main`.
     pub main_calls: Vec<(Vec<String>, usize)>,
     /// Method calls inside the body of top-level `fn main`.
@@ -692,6 +696,38 @@ fn item_kind_line(i: &syn::Item) -> (usize, String) {
     }
 }
 
+fn top_items(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
+    use syn::Item as I;
+    use syn::spanned::Spanned;
+    for i in items {
+        let named = |line: usize, kind: &str, name: &syn::Ident| (line, format!("{kind} {name}"));
+        out.push(match i {
+            I::Use(x) => (x.use_token.span.start().line, "use".into()),
+            I::ExternCrate(x) => named(x.extern_token.span.start().line, "extern crate", &x.ident),
+            I::Mod(x) => named(x.mod_token.span.start().line, "mod", &x.ident),
+            I::Fn(x) => named(x.sig.fn_token.span.start().line, "fn", &x.sig.ident),
+            I::Struct(x) => named(x.struct_token.span.start().line, "struct", &x.ident),
+            I::Enum(x) => named(x.enum_token.span.start().line, "enum", &x.ident),
+            I::Union(x) => named(x.union_token.span.start().line, "union", &x.ident),
+            I::Trait(x) => named(x.trait_token.span.start().line, "trait", &x.ident),
+            I::Type(x) => named(x.type_token.span.start().line, "type", &x.ident),
+            I::Const(x) => named(x.const_token.span.start().line, "const", &x.ident),
+            I::Static(x) => named(x.static_token.span.start().line, "static", &x.ident),
+            other => {
+                let (line, kind) = item_kind_line(other);
+                (
+                    if line == 0 {
+                        other.span().start().line
+                    } else {
+                        line
+                    },
+                    kind,
+                )
+            }
+        });
+    }
+}
+
 fn plain_items(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
     use syn::Item as I;
     for i in items {
@@ -746,6 +782,7 @@ fn scan_inner(src: &str, parse_verus: bool, skip_cfg_test: bool) -> Result<Facts
         ..Facts::default()
     };
     plain_items(&file.items, &mut out.plain_items);
+    top_items(&file.items, &mut out.top_items);
     let bodies = plain::visit_file(&file, &mut out, skip_cfg_test);
     crate::resolve::plain::visit_file(&file, &mut out.items, skip_cfg_test);
     #[cfg(feature = "verus")]
