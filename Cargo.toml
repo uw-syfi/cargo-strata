@@ -1,6 +1,6 @@
 [package]
 name = "cargo-strata"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Enforce crate and module dependency rules in a Cargo workspace, with optional Verus support"
