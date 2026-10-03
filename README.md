@@ -132,7 +132,7 @@ Three kinds of rule, all from one `strata.toml` at the workspace root:
    `#[path]`/`include!` reach. Same parser, same `verus!` handling.
 
 ```sh
-cargo strata check [--manifest-path Cargo.toml] [--config strata.toml]
+cargo strata check [--manifest-path Cargo.toml] [--config strata.toml] [--strict]
 cargo strata init [--manifest-path ..] [--output strata.toml] [--verus]
 ```
 
@@ -142,6 +142,12 @@ Other output lines:
 error[module]: src/memory.rs:4: module `memory` references `engine` (via `crate::engine::step`): `memory` does not list it in depends_on
 error[authority]: app/src/lib.rs:10: `Permit { .. }`: only `gate/src/lib.rs` may construct Permit
 ```
+
+A file the Rust parser rejects (nightly-only syntax such as `gen` blocks or
+default field values) is skipped with a warning naming its line and column,
+and the run continues; the rules see nothing of that file. `--strict` makes it
+`error[parse]` (exit 2). Read errors and the size and nesting limits below are
+always errors.
 
 Without the `verus` feature, `verus_syn` is not a dependency: nothing extra is
 compiled, and nothing extra runs.
@@ -402,6 +408,8 @@ Limits of resolution (all syntactic):
 * Crate rules read declared dependencies (`cargo metadata` `packages`), so
   feature-gated and target-specific deps are included; edges are by package
   name, ignoring renames.
+* A file that fails to parse is skipped, so no rule sees it (`--strict` turns
+  that into an error).
 * Source files larger than 2 MiB, nested deeper than 256 brackets or generic
   arguments, or with more than 20,000 tokens between separators (`;` `,` `{`
   `}`) are reported as parse errors instead of risking a stack overflow in
@@ -436,7 +444,7 @@ entry built with `--features verus`):
 
 About 22 microseconds per line. Known gaps seen there: verus's forked rustc
 crates use nightly-only syntax (`gen` blocks, default field values) that `syn`
-rejects, so two files are `error[parse]` (exit 2) with their line and column;
+rejects, so two files are skipped with a parse warning (an error with `--strict`);
 tokio declares many modules inside `cfg_*!` macros; these are read as written
 (129 module rules before that was supported, 524 now).
 

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo strata check [--manifest-path <Cargo.toml>] [--config <strata.toml>]\n       cargo strata init [--manifest-path <Cargo.toml>] [--output <strata.toml>] [--verus]";
+const USAGE: &str = "usage: cargo strata check [--manifest-path <Cargo.toml>] [--config <strata.toml>] [--strict]\n       cargo strata init [--manifest-path <Cargo.toml>] [--output <strata.toml>] [--verus]";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
-    let (mut manifest, mut config) = (None, None);
+    let (mut manifest, mut config, mut strict) = (None, None, false);
     let mut it = args.into_iter().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -27,13 +27,14 @@ fn main() -> ExitCode {
                 Some(v) => config = Some(PathBuf::from(v)),
                 None => return usage_err("--config needs a value"),
             },
+            "--strict" => strict = true,
             _ => {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
-    match cargo_strata::run(manifest.as_deref(), config.as_deref()) {
+    match cargo_strata::run_with(manifest.as_deref(), config.as_deref(), strict) {
         Ok(o) => {
             for w in &o.warnings {
                 eprintln!("warning: {w}");
