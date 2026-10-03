@@ -401,3 +401,20 @@ fn main_call_rule() {
         ]
     );
 }
+
+#[test]
+fn public_modules_flag_paths_into_private_modules() {
+    let o = fixture("surface");
+    let l = lines(&o, "surface");
+    let text = l.join("\n");
+    assert_eq!(l.len(), 2, "{text}");
+    assert!(
+        l[0].contains("user/src/lib.rs:2:") && l[0].contains("`inner`"),
+        "{text}"
+    );
+    assert!(
+        l[1].contains("user/src/lib.rs:7:") && l[1].contains("`inner`"),
+        "{text}"
+    );
+    assert_eq!(o.violations, 2, "{text}");
+}

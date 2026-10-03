@@ -35,10 +35,10 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-struct FileScan {
-    file: PathBuf,
-    module: Vec<String>,
-    scan: Scan,
+pub struct FileScan {
+    pub file: PathBuf,
+    pub module: Vec<String>,
+    pub scan: Scan,
 }
 
 fn split(p: &str) -> Vec<String> {
@@ -159,6 +159,36 @@ fn resolve(
     }
 }
 
+/// Every file reachable by `mod` declarations from the crate's target roots,
+/// the module each belongs to, and the set of known modules (the root, file
+/// modules and inline modules). Read and parse errors go in the report.
+pub fn scan_crate(
+    roots: &[PathBuf],
+    parse_verus: bool,
+    skip_cfg_test: bool,
+) -> (Vec<FileScan>, HashSet<Vec<String>>, Report) {
+    let mut w = Walker {
+        parse_verus,
+        skip_cfg_test,
+        seen: HashSet::new(),
+        files: Vec::new(),
+        rep: Report::default(),
+    };
+    for root in roots {
+        w.walk(root, vec![], true);
+    }
+    let Walker { files, rep, .. } = w;
+    let mut known: HashSet<Vec<String>> = HashSet::new();
+    known.insert(vec![]);
+    for f in &files {
+        known.insert(f.module.clone());
+        for im in &f.scan.inline_mods {
+            known.insert([&f.module[..], &im[..]].concat());
+        }
+    }
+    (files, known, rep)
+}
+
 pub fn check_crate(
     krate: &str,
     roots: &[PathBuf],
@@ -173,25 +203,7 @@ pub fn check_crate(
     }
     let want_verus = rules.iter().any(|r| r.verus);
     let parse_verus = want_verus && verus_feature;
-    let mut w = Walker {
-        parse_verus,
-        skip_cfg_test: cfg.skip_cfg_test,
-        seen: HashSet::new(),
-        files: Vec::new(),
-        rep: Report::default(),
-    };
-    for root in roots {
-        w.walk(root, vec![], true);
-    }
-    let Walker { files, mut rep, .. } = w;
-    let mut known: HashSet<Vec<String>> = HashSet::new();
-    known.insert(vec![]);
-    for f in &files {
-        known.insert(f.module.clone());
-        for im in &f.scan.inline_mods {
-            known.insert([&f.module[..], &im[..]].concat());
-        }
-    }
+    let (files, known, mut rep) = scan_crate(roots, parse_verus, cfg.skip_cfg_test);
     let units: Vec<ModuleUnit> = files
         .iter()
         .map(|f| ModuleUnit {

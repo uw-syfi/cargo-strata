@@ -168,3 +168,13 @@ fn valid_config_is_clean() {
     let o = run_cfg("[[group]]\nname = \"g\"\ncrates = [\"a\"]\n[[group]]\nname = \"h\"\ncrates = [\"b\"]\n[[crate]]\nname = \"a\"\nallow = [\"b\"]\n[[crate.module]]\npath = \"m\"\ndepends_on = [\"n\"]\n").unwrap();
     assert_eq!((o.violations, o.errors), (0, 0), "{:?}", o.lines);
 }
+
+#[test]
+fn public_module_names_must_exist() {
+    let e = err("[[crate]]\nname = \"a\"\npublic_modules = [\"m\",\n  \"typo\"]\n");
+    assert!(
+        e.contains(":4: crate `a`: public_modules names `typo`, which is not a module"),
+        "{e}"
+    );
+    assert!(!e.contains("`m`, which"), "{e}");
+}

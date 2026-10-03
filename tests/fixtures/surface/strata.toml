@@ -1,0 +1,4 @@
+[[crate]]
+name = "target_crate"
+public_modules = ["api", "shapes"]
+public_modules_for = ["user"]
