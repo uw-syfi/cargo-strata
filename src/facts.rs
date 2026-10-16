@@ -844,6 +844,9 @@ fn scan_inner(src: &str, parse_verus: bool, skip_cfg_test: bool) -> Result<Facts
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Word {
     Ident(String),
+    /// `'name`: a lifetime or label (`'static`, `'a`). An identifier word
+    /// never matches the name of a lifetime.
+    Lifetime(String),
     /// `::`
     Path,
     /// `name(`: call. `empty` for `name()`.
@@ -861,6 +864,8 @@ fn compile(pattern: &str) -> Vec<Word> {
                 name: crate::scan::unraw(&name),
                 empty: true,
             });
+        } else if let Some(name) = w.strip_prefix('\'') {
+            out.push(Word::Lifetime(name.to_string()));
         } else if let Some(name) = w.strip_suffix('(') {
             out.push(Word::Call {
                 name: crate::scan::unraw(&name),
@@ -882,6 +887,13 @@ fn is_punct(t: &TokenTree, c: char) -> bool {
     matches!(t, TokenTree::Punct(p) if p.as_char() == c)
 }
 
+/// Is `toks[j]` the name of a lifetime or label? The lexer splits
+/// `'static` into a `'` punct and the identifier `static`; a `'` punct
+/// only ever starts a lifetime (character literals are literals).
+fn is_lifetime_name(toks: &[TokenTree], j: usize) -> bool {
+    j > 0 && is_punct(&toks[j - 1], '\'')
+}
+
 /// Does `pat` match `toks` starting at `i`? Returns the first token's line.
 fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
     let mut j = i;
@@ -890,10 +902,19 @@ fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
         match &pat[k] {
             Word::Ident(n) => {
                 if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if crate::scan::unraw(id) == *n)
+                    || is_lifetime_name(toks, j)
                 {
                     return false;
                 }
                 j += 1;
+            }
+            Word::Lifetime(n) => {
+                if !(toks.get(j).is_some_and(|t| is_punct(t, '\''))
+                    && matches!(toks.get(j + 1), Some(TokenTree::Ident(id)) if *id == n))
+                {
+                    return false;
+                }
+                j += 2;
             }
             Word::Path => {
                 if !(toks.get(j).is_some_and(|t| is_punct(t, ':'))
@@ -905,6 +926,7 @@ fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
             }
             Word::Call { name, empty } => {
                 if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if crate::scan::unraw(id) == *name)
+                    || is_lifetime_name(toks, j)
                 {
                     return false;
                 }

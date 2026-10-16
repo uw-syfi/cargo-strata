@@ -314,7 +314,7 @@ also sees inside `verus!` without the feature).
 | Key | Meaning |
 | --- | --- |
 | `name` | Label in messages |
-| `patterns` | Space-separated words over consecutive tokens at one nesting level: an identifier, a path `a::b`, `name(` (a call, not preceded by `.` or `:`), or `name()` (empty call) |
+| `patterns` | Space-separated words over consecutive tokens at one nesting level: an identifier or keyword, a path `a::b`, `name(` (a call, not preceded by `.` or `:`), `name()` (empty call), or a lifetime `'name` |
 | `attributes` | Attribute names (paths: `path`, `no_mangle`, `verifier::external_body`). See below. A forbid needs `patterns`, `attributes` or both |
 | `allow` | File globs where the patterns and attributes may appear |
 | `crates`, `dirs` | Crates (default all) and directories of each (default `["src"]`) |
@@ -333,6 +333,10 @@ matches its raw spelling too (`include` matches `r#include!`, `path` matches
 `#[r#path]`). Comments, strings and identifiers outside
 an attribute never match; a pattern `path` matches the identifier anywhere,
 the attribute `path` only `#[path ..]`.
+A lifetime is its own token: the pattern `static` matches `static` items
+(`static X`, `static mut`, in macro bodies such as `thread_local!`) but not
+`&'static str`, `T: 'static` or `impl Trait + 'static`; the pattern
+`'static` matches only the lifetime. Labels (`'outer:`) are lifetimes too.
 
 ```toml
 [[forbid]]

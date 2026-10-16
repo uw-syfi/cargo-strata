@@ -76,7 +76,9 @@ pub struct Forbid {
     /// Token patterns: space-separated words matched against consecutive
     /// tokens at one nesting level. A word is an identifier, a `a::b` path,
     /// `name(` (a call: the identifier followed by a parenthesized group, not
-    /// preceded by `.` or `:`) or `name()` (call with no arguments).
+    /// preceded by `.` or `:`), `name()` (call with no arguments) or `'name`
+    /// (a lifetime or label). Identifier and call words never match the name
+    /// of a lifetime: `static` does not match `&'static str`.
     #[serde(default)]
     pub patterns: Vec<String>,
     /// Attribute names (paths such as `path` or `verifier::external_body`):
