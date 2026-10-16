@@ -357,7 +357,14 @@ fn reexport_unsafe_forbid_and_source_reach_lints() {
         at(&l, "source-reach"),
         ["app/src/lib.rs:2", "app/src/lib.rs:6"]
     );
-    assert_eq!(at(&l, "forbid"), ["app/src/lib.rs:16"]);
+    assert_eq!(
+        at(&l, "forbid"),
+        [
+            "app/src/lib.rs:16",
+            "app/src/lib.rs:42",
+            "gate/src/lib.rs:12"
+        ]
+    );
     let text = l.join("\n");
     assert!(
         text.contains("`app` has 3 unsafe sites, ratchet allows 1"),
@@ -368,6 +375,29 @@ fn reexport_unsafe_forbid_and_source_reach_lints() {
         "{text}"
     );
     assert!(text.contains("entry for `ghost`"), "{text}");
+}
+
+/// `attributes` in `[[forbid]]`: `#[unsafe(no_mangle)]` inside `cfg_attr`
+/// outside the allowed file is reported; the exempted `#[path]` is not, and
+/// its exemption is not stale; in the allowed file only the untagged
+/// attribute is reported; comments, strings and plain identifiers are not
+/// attributes.
+#[test]
+fn forbid_attributes() {
+    let l = lints_fixture();
+    let text = l.join("\n");
+    assert!(
+        text.contains(
+            "app/src/lib.rs:42: attribute `#[no_mangle]` outside the files `link attributes` allows"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("gate/src/lib.rs:12: attribute `#[no_mangle]` has no `// LINK:` comment"),
+        "{text}"
+    );
+    assert!(!text.contains("#[path]"), "{text}");
+    assert!(!text.contains("stale exemption"), "{text}");
 }
 
 /// Regression: with `check_optional = false`, an optional dependency switched

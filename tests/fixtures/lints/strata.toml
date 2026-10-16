@@ -32,3 +32,14 @@ name = "srv"
 calls = ["std::env::args", "Some"]
 methods = ["nth", "unwrap"]
 entries = ["engine::serve"]
+
+[[forbid]]
+name = "link attributes"
+attributes = ["path", "no_mangle"]
+allow = ["gate/src/lib.rs"]
+require_comment = "LINK:"
+crates = ["app", "gate"]
+
+[[forbid.exempt]]
+file = "app/src/lib.rs"
+attribute = "path"

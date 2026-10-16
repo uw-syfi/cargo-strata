@@ -6,3 +6,8 @@ pub fn mint() -> Permit {
 pub fn permit(x: u32) -> Permit {
     Permit { id: x }
 }
+// LINK: the C entry point
+#[no_mangle]
+pub extern "C" fn gate_entry() {}
+#[unsafe(no_mangle)]
+pub extern "C" fn untagged() {}

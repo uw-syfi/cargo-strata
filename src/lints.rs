@@ -29,6 +29,9 @@ pub struct FileInfo {
     pub facts: Facts,
     /// `(pattern, line)` hits of the `[[forbid]]` patterns that apply to this crate.
     pub hits: Vec<(String, usize)>,
+    /// `(attribute, line)` hits of the `[[forbid]]` attributes that apply to
+    /// this crate (see [`crate::facts::attribute_hits`]).
+    pub attr_hits: Vec<(String, usize)>,
 }
 
 pub struct CrateInfo {
@@ -410,29 +413,38 @@ fn has_tag(src_lines: &[&str], line: usize, tag: &str) -> bool {
     false
 }
 
-fn forbid(
-    fb: &Forbid,
-    f: &FileInfo,
-    used: &mut BTreeSet<(String, String)>,
-    out: &mut Vec<LintViolation>,
-) {
+/// Exemptions used so far: (file, is attribute, pattern or attribute).
+type Used = BTreeSet<(String, bool, String)>;
+
+fn forbid(fb: &Forbid, f: &FileInfo, used: &mut Used, out: &mut Vec<LintViolation>) {
     let allowed = fb.allow.iter().any(|g| glob_match(g, &f.rel));
     let lines: Vec<&str> = f.src.lines().collect();
-    for (pat, line) in f.hits.iter().filter(|(p, _)| fb.patterns.contains(p)) {
+    let pats = f
+        .hits
+        .iter()
+        .filter(|(p, _)| fb.patterns.contains(p))
+        .map(|(p, l)| (false, p, l));
+    let attrs = f
+        .attr_hits
+        .iter()
+        .filter(|(a, _)| fb.attributes.contains(a))
+        .map(|(a, l)| (true, a, l));
+    for (attr, what, line) in pats.chain(attrs) {
+        let shown = if attr {
+            format!("attribute `#[{what}]`")
+        } else {
+            format!("`{what}`")
+        };
         if !allowed {
-            if fb
-                .exempt
-                .iter()
-                .any(|e| e.file == f.rel && &e.pattern == pat)
-            {
-                used.insert((f.rel.clone(), pat.clone()));
+            if fb.exempt.iter().any(|e| e.covers(&f.rel, what, attr)) {
+                used.insert((f.rel.clone(), attr, what.clone()));
                 continue;
             }
             out.push(LintViolation {
                 kind: "forbid",
                 file: f.rel.clone(),
                 line: *line,
-                msg: format!("`{pat}` outside the files `{}` allows", fb.name),
+                msg: format!("{shown} outside the files `{}` allows", fb.name),
             });
         } else if let Some(tag) = &fb.require_comment
             && !has_tag(&lines, *line, tag)
@@ -441,7 +453,7 @@ fn forbid(
                 kind: "forbid",
                 file: f.rel.clone(),
                 line: *line,
-                msg: format!("`{pat}` has no `// {tag}` comment (`{}`)", fb.name),
+                msg: format!("{shown} has no `// {tag}` comment (`{}`)", fb.name),
             });
         }
     }
@@ -658,7 +670,7 @@ pub fn evaluate(
 ) -> Vec<LintViolation> {
     let mut out = Vec::new();
     let mut ratcheted: BTreeSet<&str> = BTreeSet::new();
-    let mut exempt_used: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut exempt_used: Used = BTreeSet::new();
     // Name tables for every scanned crate (a re-export may pass through a
     // workspace dependency), built once when some lint needs them.
     let needs_tables = cfg.resolve
@@ -805,14 +817,19 @@ pub fn evaluate(
     }
     for fb in &cfg.forbids {
         for e in &fb.exempt {
-            if !exempt_used.contains(&(e.file.clone(), e.pattern.clone())) {
+            let (attr, what, shown) = match (&e.pattern, &e.attribute) {
+                (Some(p), _) => (false, p, format!("`{p}`")),
+                (None, Some(a)) => (true, a, format!("attribute `#[{a}]`")),
+                (None, None) => continue,
+            };
+            if !exempt_used.contains(&(e.file.clone(), attr, what.clone())) {
                 out.push(LintViolation {
                     kind: "forbid",
                     file: e.file.clone(),
                     line: 0,
                     msg: format!(
-                        "stale exemption of `{}` in `{}`: no such hit; delete it",
-                        e.pattern, fb.name
+                        "stale exemption of {shown} in `{}`: no such hit; delete it",
+                        fb.name
                     ),
                 });
             }
@@ -898,6 +915,7 @@ struct Job {
     abs: PathBuf,
     parse_verus: bool,
     pats: Vec<String>,
+    attrs: Vec<String>,
 }
 
 fn scan_job(j: &Job, ws_root: &Path, skip: bool) -> Result<FileInfo, String> {
@@ -906,10 +924,11 @@ fn scan_job(j: &Job, ws_root: &Path, skip: bool) -> Result<FileInfo, String> {
         .map_err(|e| format!("{}: cannot read: {e}", j.abs.display()))?;
     let facts = crate::facts::scan_facts(&src, j.parse_verus, skip)
         .map_err(|e| format!("{rel}: parse error: {e}"))?;
-    let hits = if j.pats.is_empty() {
-        Vec::new()
+    let (hits, attr_hits) = if j.pats.is_empty() && j.attrs.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
-        crate::facts::token_hits(&src, &j.pats).map_err(|e| format!("{rel}: parse error: {e}"))?
+        crate::facts::lexical_hits(&src, &j.pats, &j.attrs)
+            .map_err(|e| format!("{rel}: parse error: {e}"))?
     };
     let crate_rel = j
         .abs
@@ -924,6 +943,7 @@ fn scan_job(j: &Job, ws_root: &Path, skip: bool) -> Result<FileInfo, String> {
         src,
         facts,
         hits,
+        attr_hits,
     })
 }
 
@@ -1022,11 +1042,18 @@ pub fn check(
                 &mut paths,
             );
         }
-        let pats: Vec<String> = cfg
-            .forbids
-            .iter()
-            .filter(|f| f.crates.iter().any(|g| glob_match(g, &pkg.name)))
+        let applying = || {
+            cfg.forbids
+                .iter()
+                .filter(|f| f.crates.iter().any(|g| glob_match(g, &pkg.name)))
+        };
+        let pats: Vec<String> = applying()
             .flat_map(|f| f.patterns.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let attrs: Vec<String> = applying()
+            .flat_map(|f| f.attributes.iter().cloned())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -1041,6 +1068,7 @@ pub fn check(
                 abs,
                 parse_verus,
                 pats: pats.clone(),
+                attrs: attrs.clone(),
             });
         }
     }

@@ -199,3 +199,58 @@ fn exempt_names_must_be_modules() {
         "{e}"
     );
 }
+
+#[test]
+fn forbid_needs_patterns_or_attributes() {
+    let e = err("[[crate]]\nname = \"a\"\n\n[[forbid]]\nname = \"empty\"\nallow = []\n");
+    assert!(
+        e.contains(":4: forbid `empty`: needs `patterns` or `attributes`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn forbid_attribute_names_are_paths() {
+    let e = err(
+        "[[forbid]]\nname = \"attrs\"\nattributes = [\"path\",\n  \"#[no_mangle]\",\n  \"verifier::external_body\",\n  \"link =\"]\n",
+    );
+    assert!(
+        e.contains(
+            ":4: forbid `attrs`: `attributes` entry `#[no_mangle]` is not an attribute name"
+        ),
+        "{e}"
+    );
+    assert!(
+        e.contains(":6: forbid `attrs`: `attributes` entry `link =` is not an attribute name"),
+        "{e}"
+    );
+    assert_eq!(e.lines().count(), 2, "{e}");
+}
+
+#[test]
+fn forbid_exemption_names_one_listed_hit() {
+    let e = err(concat!(
+        "[[forbid]]\nname = \"one\"\npatterns = [\"path\"]\nattributes = [\"no_mangle\"]\n",
+        "\n[[forbid.exempt]]\nfile = \"a/src/m.rs\"\nattribute = \"path\"\n",
+        "\n[[forbid.exempt]]\nfile = \"a/src/m.rs\"\npattern = \"path\"\nattribute = \"no_mangle\"\n",
+        "\n[[forbid]]\nname = \"two\"\nattributes = [\"path\"]\n",
+        "\n[[forbid.exempt]]\nfile = \"a/src/n.rs\"\n",
+        "\n[[forbid.exempt]]\nfile = \"a/src/n.rs\"\npattern = \"path\"\n",
+    ));
+    for want in [
+        ":6: forbid `one`: exemption for `a/src/m.rs`: attribute `path` is not in its `attributes`",
+        ":10: forbid `one`: exemption for `a/src/m.rs`: set exactly one of `pattern` and `attribute`",
+        ":19: forbid `two`: exemption for `a/src/n.rs`: set exactly one of `pattern` and `attribute`",
+        ":22: forbid `two`: exemption for `a/src/n.rs`: pattern `path` is not in its `patterns`",
+    ] {
+        assert!(e.contains(want), "missing {want}:\n{e}");
+    }
+    assert_eq!(e.lines().count(), 4, "{e}");
+}
+
+#[test]
+fn forbid_attributes_alone_is_valid() {
+    let o = run_cfg("[[forbid]]\nname = \"attrs\"\nattributes = [\"path\", \"rustfmt::skip\"]\n")
+        .unwrap();
+    assert_eq!((o.violations, o.errors), (0, 0), "{:?}", o.lines);
+}

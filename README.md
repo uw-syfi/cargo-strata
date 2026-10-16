@@ -128,8 +128,9 @@ Three kinds of rule, all from one `strata.toml` at the workspace root:
    from `use` trees and `crate::`/`self::`/`super::` paths in the source,
    with names resolved through re-exports, globs and renames.
 3. **Source lints**: who may construct a type, what a crate may re-export,
-   unsafe budgets, `fn main` call lists, token patterns confined to files,
-   `#[path]`/`include!` reach. Same parser, same `verus!` handling.
+   unsafe budgets, `fn main` call lists, token patterns and attributes
+   confined to files, `#[path]`/`include!` reach. Same parser, same `verus!`
+   handling.
 
 ```sh
 cargo strata check [--manifest-path Cargo.toml] [--config strata.toml] [--strict]
@@ -301,16 +302,46 @@ Macro arguments (`vec![T { a: 1 }]`) are token-scanned and count.
 
 ### `[[forbid]]`
 
-Token patterns allowed only in listed files. A lexical scan (it also sees
-inside `verus!` without the feature).
+Token patterns and attributes allowed only in listed files. A lexical scan (it
+also sees inside `verus!` without the feature).
 
 | Key | Meaning |
 | --- | --- |
-| `name`, `patterns` | Patterns are space-separated words over consecutive tokens at one nesting level: an identifier, a path `a::b`, `name(` (a call, not preceded by `.` or `:`), or `name()` (empty call) |
-| `allow` | File globs where the patterns may appear |
+| `name` | Label in messages |
+| `patterns` | Space-separated words over consecutive tokens at one nesting level: an identifier, a path `a::b`, `name(` (a call, not preceded by `.` or `:`), or `name()` (empty call) |
+| `attributes` | Attribute names (paths: `path`, `no_mangle`, `verifier::external_body`). See below. A forbid needs `patterns`, `attributes` or both |
+| `allow` | File globs where the patterns and attributes may appear |
 | `crates`, `dirs` | Crates (default all) and directories of each (default `["src"]`) |
 | `require_comment` | In allowed files, each hit needs a line comment containing this tag on its line or in the comment/attribute block directly above |
-| `[[forbid.exempt]]` | `file` and `pattern` of a tolerated hit outside `allow`; one that matches nothing is reported as stale |
+| `[[forbid.exempt]]` | `file` and either `pattern` or `attribute` (one of this forbid's own) of a tolerated hit outside `allow`; one that matches nothing is reported as stale |
+
+An attribute matches wherever it is applied: outer `#[x ..]` and inner
+`#![x ..]`, on any item, field, statement or expression, inside
+`cfg_attr(pred, .., x, ..)` at any depth, behind `unsafe(x ..)`, in macro
+bodies (including `macro_rules!` templates) and in `verus!`. The name is the
+attribute's path: arguments are not part of it (`#[verifier(external_body)]`
+is `verifier`), and names in arguments or in a `cfg_attr` predicate do not
+match. `cfg_attr` itself is a name. Doc comments are `doc` attributes. A hit
+is reported at the line of its `#`. Comments, strings and identifiers outside
+an attribute never match; a pattern `path` matches the identifier anywhere,
+the attribute `path` only `#[path ..]`.
+
+```toml
+[[forbid]]
+name = "linkage"
+attributes = ["path", "no_mangle", "export_name", "link", "link_section"]
+allow = ["ffi/src/exports.rs"]
+require_comment = "LINKAGE:"
+
+[[forbid.exempt]]
+file = "app/src/legacy.rs"
+attribute = "path"
+```
+
+```
+error[forbid]: app/src/lib.rs:42: attribute `#[no_mangle]` outside the files `linkage` allows
+error[forbid]: ffi/src/exports.rs:12: attribute `#[no_mangle]` has no `// LINKAGE:` comment (`linkage`)
+```
 
 ## What module rules see
 
@@ -479,6 +510,13 @@ testing without `cargo metadata` or the file system.
   unsafe-ratchet verdicts must match an oracle. `tests/prop_dirs.rs`: reach
   and placement against a closure oracle; token patterns against generated
   occurrences. Run with and without `--features verus`.
+* `tests/prop_attributes.rs`: generated files with attributes in every
+  position (inner, outer, fields, statements, macro bodies, `verus!`,
+  `macro_rules!` templates, nested and multi-line `cfg_attr`, `unsafe(..)`,
+  raw identifiers, doc comments) beside comments, strings, arguments and
+  predicates that must not match; hits must equal the generated truth, and
+  forbid verdicts (`allow`, `require_comment`, exemptions, `crates`, `dirs`)
+  an oracle.
 * `tests/prop_resolve.rs`: generated crates with `pub use` chains (renames,
   groups, `crate::`/`self::`/`super::` forms) and glob imports including
   cycles. A forward-closure oracle gives each exported name's defining

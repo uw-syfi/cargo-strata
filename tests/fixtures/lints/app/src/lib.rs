@@ -38,3 +38,9 @@ mod tests {
 
 // Permit { id: 1 } and unsafe { } in a comment
 const TEXT: &str = "Permit { id: 1 } unsafe fn";
+
+#[cfg_attr(unix, unsafe(no_mangle))]
+pub extern "C" fn exported() {}
+// #[no_mangle] and #[path = "x"] in a comment
+const PATH: &str = "#[no_mangle] #[path = \"x\"]";
+fn no_mangle() { let path = 1; }

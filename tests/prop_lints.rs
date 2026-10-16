@@ -450,6 +450,7 @@ proptest! {
                 src: src.clone(),
                 facts,
                 hits: vec![],
+                attr_hits: vec![],
             });
         }
         let allowed = (total_unsafe as i64 + ratchet_delta).max(0) as u64;

@@ -905,22 +905,109 @@ fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
     true
 }
 
-fn hits_in(ts: TokenStream, pats: &[(String, Vec<Word>)], out: &mut Vec<(String, usize)>) {
-    let toks: Vec<TokenTree> = ts.into_iter().collect();
-    for i in 0..toks.len() {
-        for (text, pat) in pats {
-            if !pat.is_empty() && match_at(pat, &toks, i) {
-                let line = match &toks[i] {
-                    TokenTree::Ident(id) => id.span().start().line,
-                    TokenTree::Group(g) => g.span().start().line,
-                    TokenTree::Punct(p) => p.span().start().line,
-                    TokenTree::Literal(l) => l.span().start().line,
-                };
-                out.push((text.clone(), line));
+/// The attribute path at the start of `toks` (`a::b`, a leading `::`
+/// dropped, `r#` stripped from each segment) and the number of tokens it
+/// takes; `None` when `toks` does not start with a path.
+fn attr_path(toks: &[TokenTree]) -> Option<(String, usize)> {
+    let mut j = 0;
+    if toks.first().is_some_and(|t| is_punct(t, ':'))
+        && toks.get(1).is_some_and(|t| is_punct(t, ':'))
+    {
+        j = 2;
+    }
+    let mut segs: Vec<String> = Vec::new();
+    loop {
+        let Some(TokenTree::Ident(id)) = toks.get(j) else {
+            return None;
+        };
+        let s = id.to_string();
+        segs.push(s.strip_prefix("r#").unwrap_or(&s).to_string());
+        j += 1;
+        if toks.get(j).is_some_and(|t| is_punct(t, ':'))
+            && toks.get(j + 1).is_some_and(|t| is_punct(t, ':'))
+        {
+            j += 2;
+        } else {
+            return Some((segs.join("::"), j));
+        }
+    }
+}
+
+/// Names of the attributes one attribute body (`path args`) applies:
+/// its own path, and for `cfg_attr(pred, a, b, ..)` the names in each of
+/// `a`, `b`, .. (nested). `unsafe(attr)` is transparent: it contributes
+/// the names of `attr`, not `unsafe`.
+fn attr_names(toks: &[TokenTree], out: &mut Vec<String>) {
+    let Some((name, n)) = attr_path(toks) else {
+        return;
+    };
+    let args = match toks.get(n) {
+        Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
+            Some(g.stream().into_iter().collect::<Vec<_>>())
+        }
+        _ => None,
+    };
+    match (name.as_str(), args) {
+        ("unsafe", Some(inner)) => attr_names(&inner, out),
+        ("cfg_attr", Some(inner)) => {
+            out.push(name);
+            for part in inner.split(|t| is_punct(t, ',')).skip(1) {
+                attr_names(part, out);
             }
         }
-        if let TokenTree::Group(g) = &toks[i] {
-            hits_in(g.stream(), pats, out);
+        _ => out.push(name),
+    }
+}
+
+fn line_of(t: &TokenTree) -> usize {
+    match t {
+        TokenTree::Ident(id) => id.span().start().line,
+        TokenTree::Group(g) => g.span().start().line,
+        TokenTree::Punct(p) => p.span().start().line,
+        TokenTree::Literal(l) => l.span().start().line,
+    }
+}
+
+/// Hits of both kinds in one token stream (recursively).
+struct Hits<'a> {
+    pats: &'a [(String, Vec<Word>)],
+    attrs: &'a [String],
+    pat_hits: Vec<(String, usize)>,
+    attr_hits: Vec<(String, usize)>,
+}
+
+impl Hits<'_> {
+    fn scan(&mut self, ts: TokenStream) {
+        let toks: Vec<TokenTree> = ts.into_iter().collect();
+        for i in 0..toks.len() {
+            for (text, pat) in self.pats {
+                if !pat.is_empty() && match_at(pat, &toks, i) {
+                    self.pat_hits.push((text.clone(), line_of(&toks[i])));
+                }
+            }
+            if !self.attrs.is_empty() && is_punct(&toks[i], '#') {
+                let j = if toks.get(i + 1).is_some_and(|t| is_punct(t, '!')) {
+                    i + 2
+                } else {
+                    i + 1
+                };
+                if let Some(TokenTree::Group(g)) = toks.get(j)
+                    && g.delimiter() == Delimiter::Bracket
+                {
+                    let body: Vec<TokenTree> = g.stream().into_iter().collect();
+                    let mut names = Vec::new();
+                    attr_names(&body, &mut names);
+                    let line = line_of(&toks[i]);
+                    for n in names {
+                        if self.attrs.contains(&n) {
+                            self.attr_hits.push((n, line));
+                        }
+                    }
+                }
+            }
+            if let TokenTree::Group(g) = &toks[i] {
+                self.scan(g.stream());
+            }
         }
     }
 }
@@ -928,6 +1015,25 @@ fn hits_in(ts: TokenStream, pats: &[(String, Vec<Word>)], out: &mut Vec<(String,
 /// Occurrences of token patterns anywhere in a file, `verus!` bodies
 /// included (a lexical scan: no feature needed). `(pattern, line)`.
 pub fn token_hits(src: &str, patterns: &[String]) -> Result<Vec<(String, usize)>, String> {
+    Ok(lexical_hits(src, patterns, &[])?.0)
+}
+
+/// Attributes named in `names` applied anywhere in a file: outer and inner
+/// (`#[x]`, `#![x]`), inside `cfg_attr(pred, ..)` at any depth, behind
+/// `unsafe(..)`, in macro bodies and `verus!` (a lexical scan). Doc
+/// comments are `doc` attributes. `(name, line of the `#`)`, one entry per
+/// application.
+pub fn attribute_hits(src: &str, names: &[String]) -> Result<Vec<(String, usize)>, String> {
+    Ok(lexical_hits(src, &[], names)?.1)
+}
+
+/// [`token_hits`] and [`attribute_hits`] in one pass over the tokens.
+#[allow(clippy::type_complexity)]
+pub fn lexical_hits(
+    src: &str,
+    patterns: &[String],
+    attributes: &[String],
+) -> Result<(Vec<(String, usize)>, Vec<(String, usize)>), String> {
     if src.len() > crate::scan::MAX_SOURCE_BYTES {
         return Err(format!(
             "source larger than {} bytes",
@@ -943,9 +1049,14 @@ pub fn token_hits(src: &str, patterns: &[String]) -> Result<Vec<(String, usize)>
                 let ts: TokenStream = src
                     .parse()
                     .map_err(|e: proc_macro2::LexError| e.to_string())?;
-                let mut out = Vec::new();
-                hits_in(ts, &pats, &mut out);
-                Ok(out)
+                let mut h = Hits {
+                    pats: &pats,
+                    attrs: attributes,
+                    pat_hits: Vec::new(),
+                    attr_hits: Vec::new(),
+                };
+                h.scan(ts);
+                Ok((h.pat_hits, h.attr_hits))
             })
             .map_err(|e| format!("cannot start scan thread: {e}"))?
             .join()
