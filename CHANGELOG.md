@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+* Raw identifiers no longer bypass rules. Every name is compared with its
+  `r#` prefix removed: forbid patterns (`r#include!("x")` matches
+  `include`, `r#Justifies` matches `Justifies`), forbid attributes, module
+  rules (`crate::r#sibling::f` and `use crate::{r#sibling}` are the sibling;
+  `mod r#type;` is module `type`), crate names in paths for `public_modules`
+  and `deny_reexport`, authority type and call names, method names,
+  `#[r#cfg(test)]` skipping, `#[r#path]` module mapping and `fn r#main`.
+  Names in `strata.toml` (patterns, attributes, module paths) may be written
+  either way. Keywords are still matched only unprefixed (`r#unsafe { .. }`
+  is not an unsafe block).
+
+### Testing
+
+* `tests/raw_identifiers.rs`: one case per rule kind with raw spellings.
+
 ## 0.3.0
 
 ### Rules

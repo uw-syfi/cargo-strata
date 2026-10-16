@@ -47,7 +47,7 @@ pub struct FileScan {
 fn split(p: &str) -> Vec<String> {
     p.split("::")
         .filter(|s| !s.is_empty() && *s != "crate")
-        .map(str::to_string)
+        .map(|s| crate::scan::unraw(&s))
         .collect()
 }
 

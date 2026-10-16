@@ -138,7 +138,7 @@ fn include_of(mac: &str, ts: &TokenStream, line: usize) -> Include {
                 }
                 TokenTree::Group(g) => walk(g.stream(), text, md, dynamic),
                 TokenTree::Ident(i) => {
-                    if !matches!(i.to_string().as_str(), "concat" | "env") {
+                    if !matches!(crate::scan::unraw(&i).as_str(), "concat" | "env") {
                         *dynamic = true;
                     }
                 }
@@ -171,7 +171,10 @@ pub fn scan_tokens(ts: TokenStream, out: &mut Facts, ctx: Ctx) {
                 i += 1;
             }
             TokenTree::Ident(id) => {
-                let first = id.to_string();
+                // Keywords are matched as written (`r#unsafe` is an identifier);
+                // names are matched without the raw prefix.
+                let raw = id.to_string();
+                let first = crate::scan::unraw(&raw);
                 let line = id.span().start().line;
                 let prev_dot =
                     i > 0 && matches!(&toks[i - 1], TokenTree::Punct(p) if p.as_char() == '.');
@@ -183,7 +186,7 @@ pub fn scan_tokens(ts: TokenStream, out: &mut Facts, ctx: Ctx) {
                 let prev_kw = i > 0
                     && matches!(&toks[i - 1], TokenTree::Ident(p)
                         if matches!(p.to_string().as_str(), "struct" | "enum" | "union" | "trait" | "fn" | "mod" | "type"));
-                if first == "unsafe" {
+                if raw == "unsafe" {
                     let hit = match toks.get(i + 1) {
                         Some(TokenTree::Group(g)) => g.delimiter() == Delimiter::Brace,
                         Some(TokenTree::Ident(n)) => {
@@ -209,7 +212,7 @@ pub fn scan_tokens(ts: TokenStream, out: &mut Facts, ctx: Ctx) {
                     if a.as_char() != ':' || b.as_char() != ':' {
                         break;
                     }
-                    segs.push(n.to_string());
+                    segs.push(crate::scan::unraw(n));
                     j += 3;
                 }
                 // turbofish
@@ -288,17 +291,26 @@ macro_rules! facts_scanner {
 
             fn is_cfg_test(attrs: &[$syn::Attribute]) -> bool {
                 attrs.iter().any(|a| {
-                    a.path().is_ident("cfg")
-                        && match &a.meta {
-                            $syn::Meta::List(l) => l.tokens.to_string().trim() == "test",
-                            _ => false,
+                    crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "cfg",
+                    ) && match &a.meta {
+                        $syn::Meta::List(l) => {
+                            crate::scan::unraw(&l.tokens.to_string().trim()) == "test"
                         }
+                        _ => false,
+                    }
                 })
             }
 
             fn path_attr(attrs: &[$syn::Attribute]) -> Option<String> {
                 for a in attrs {
-                    if a.path().is_ident("path") {
+                    if crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "path",
+                    ) {
                         if let $syn::Meta::NameValue(nv) = &a.meta {
                             if let $syn::Expr::Lit($syn::ExprLit {
                                 lit: $syn::Lit::Str(s),
@@ -322,13 +334,13 @@ macro_rules! facts_scanner {
             ) {
                 match t {
                     $syn::UseTree::Path(p) => {
-                        prefix.push(p.ident.to_string());
+                        prefix.push(crate::scan::unraw(&p.ident));
                         flatten(&p.tree, prefix, line, inline, out);
                         prefix.pop();
                     }
                     $syn::UseTree::Name(n) => {
                         let mut s = prefix.clone();
-                        s.push(n.ident.to_string());
+                        s.push(crate::scan::unraw(&n.ident));
                         out.push(PubUse {
                             segs: s,
                             glob: false,
@@ -338,7 +350,7 @@ macro_rules! facts_scanner {
                     }
                     $syn::UseTree::Rename(n) => {
                         let mut s = prefix.clone();
-                        s.push(n.ident.to_string());
+                        s.push(crate::scan::unraw(&n.ident));
                         out.push(PubUse {
                             segs: s,
                             glob: false,
@@ -391,7 +403,7 @@ macro_rules! facts_scanner {
                         p.path
                             .segments
                             .iter()
-                            .map(|s| s.ident.to_string())
+                            .map(|s| crate::scan::unraw(&s.ident))
                             .collect(),
                     ),
                     _ => None,
@@ -462,7 +474,9 @@ macro_rules! facts_scanner {
                         self.out.unsafe_sites.push(line_of(i.sig.fn_token.span));
                     }
                     self.fn_span(i.sig.fn_token.span, &i.block);
-                    let main = self.inline.is_empty() && !self.in_main && i.sig.ident == "main";
+                    let main = self.inline.is_empty()
+                        && !self.in_main
+                        && crate::scan::unraw(&i.sig.ident) == "main";
                     if main {
                         self.in_main = true;
                         self.out.has_main = true;
@@ -475,9 +489,11 @@ macro_rules! facts_scanner {
 
                 fn visit_expr_method_call(&mut self, i: &'ast $syn::ExprMethodCall) {
                     let l = line_of(i.method.span());
-                    self.out.methods.push((i.method.to_string(), l));
+                    self.out.methods.push((crate::scan::unraw(&i.method), l));
                     if self.in_main {
-                        self.out.main_methods.push((i.method.to_string(), l));
+                        self.out
+                            .main_methods
+                            .push((crate::scan::unraw(&i.method), l));
                     }
                     $syn::visit::visit_expr_method_call(self, i);
                 }
@@ -546,13 +562,13 @@ macro_rules! facts_scanner {
                     if let Some(last) = i.path.segments.last() {
                         self.out
                             .struct_lits
-                            .push((last.ident.to_string(), line_of(last.ident.span())));
+                            .push((crate::scan::unraw(&last.ident), line_of(last.ident.span())));
                         if i.qself.is_none() {
                             let segs = i
                                 .path
                                 .segments
                                 .iter()
-                                .map(|s| s.ident.to_string())
+                                .map(|s| crate::scan::unraw(&s.ident))
                                 .collect();
                             let site = self.site(segs, line_of(last.ident.span()));
                             self.out.lit_sites.push(site);
@@ -568,7 +584,7 @@ macro_rules! facts_scanner {
                                 .path
                                 .segments
                                 .iter()
-                                .map(|s| s.ident.to_string())
+                                .map(|s| crate::scan::unraw(&s.ident))
                                 .collect();
                             if let Some(l) = p.path.segments.last() {
                                 let line = line_of(l.ident.span());
@@ -596,7 +612,7 @@ macro_rules! facts_scanner {
                         });
                     }
                     if i.content.is_some() {
-                        self.inline.push(i.ident.to_string());
+                        self.inline.push(crate::scan::unraw(&i.ident));
                         $syn::visit::visit_item_mod(self, i);
                         self.inline.pop();
                     }
@@ -607,7 +623,7 @@ macro_rules! facts_scanner {
                         .path
                         .segments
                         .last()
-                        .map(|s| s.ident.to_string())
+                        .map(|s| crate::scan::unraw(&s.ident))
                         .unwrap_or_default();
                     let line = last_line(&m.path);
                     if last == "verus" {
@@ -689,7 +705,7 @@ fn item_kind_line(i: &syn::Item) -> (usize, String) {
                 .path
                 .segments
                 .last()
-                .map(|s| format!("{}!", s.ident))
+                .map(|s| format!("{}!", crate::scan::unraw(&s.ident)))
                 .unwrap_or_default(),
         ),
         other => (other.span().start().line, "item".into()),
@@ -700,7 +716,9 @@ fn top_items(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
     use syn::Item as I;
     use syn::spanned::Spanned;
     for i in items {
-        let named = |line: usize, kind: &str, name: &syn::Ident| (line, format!("{kind} {name}"));
+        let named = |line: usize, kind: &str, name: &syn::Ident| {
+            (line, format!("{kind} {}", crate::scan::unraw(name)))
+        };
         out.push(match i {
             I::Use(x) => (x.use_token.span.start().line, "use".into()),
             I::ExternCrate(x) => named(x.extern_token.span.start().line, "extern crate", &x.ident),
@@ -743,7 +761,7 @@ fn plain_items(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
                     .path
                     .segments
                     .last()
-                    .is_some_and(|s| s.ident == "verus") => {}
+                    .is_some_and(|s| crate::scan::unraw(&s.ident) == "verus") => {}
             other => out.push(item_kind_line(other)),
         }
     }
@@ -751,9 +769,9 @@ fn plain_items(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
 
 fn forbids_unsafe(f: &syn::File) -> bool {
     f.attrs.iter().any(|a| {
-        a.path().is_ident("forbid")
+        crate::scan::is_named(a.path().segments.iter().map(|s| &s.ident), a.path().leading_colon.is_some(), "forbid")
             && matches!(&a.meta, syn::Meta::List(l)
-                if l.tokens.clone().into_iter().any(|t| matches!(t, TokenTree::Ident(i) if i == "unsafe_code")))
+                if l.tokens.clone().into_iter().any(|t| matches!(t, TokenTree::Ident(i) if crate::scan::unraw(&i) == "unsafe_code")))
     })
 }
 
@@ -840,12 +858,12 @@ fn compile(pattern: &str) -> Vec<Word> {
     for w in pattern.split_whitespace() {
         if let Some(name) = w.strip_suffix("()") {
             out.push(Word::Call {
-                name: name.to_string(),
+                name: crate::scan::unraw(&name),
                 empty: true,
             });
         } else if let Some(name) = w.strip_suffix('(') {
             out.push(Word::Call {
-                name: name.to_string(),
+                name: crate::scan::unraw(&name),
                 empty: false,
             });
         } else {
@@ -853,7 +871,7 @@ fn compile(pattern: &str) -> Vec<Word> {
                 if i > 0 {
                     out.push(Word::Path);
                 }
-                out.push(Word::Ident(seg.to_string()));
+                out.push(Word::Ident(crate::scan::unraw(&seg)));
             }
         }
     }
@@ -871,7 +889,8 @@ fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
     while k < pat.len() {
         match &pat[k] {
             Word::Ident(n) => {
-                if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if id == n) {
+                if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if crate::scan::unraw(id) == *n)
+                {
                     return false;
                 }
                 j += 1;
@@ -885,7 +904,8 @@ fn match_at(pat: &[Word], toks: &[TokenTree], i: usize) -> bool {
                 j += 2;
             }
             Word::Call { name, empty } => {
-                if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if id == name) {
+                if !matches!(toks.get(j), Some(TokenTree::Ident(id)) if crate::scan::unraw(id) == *name)
+                {
                     return false;
                 }
                 if i > 0 && j == i && (is_punct(&toks[i - 1], '.') || is_punct(&toks[i - 1], ':')) {
@@ -920,8 +940,7 @@ fn attr_path(toks: &[TokenTree]) -> Option<(String, usize)> {
         let Some(TokenTree::Ident(id)) = toks.get(j) else {
             return None;
         };
-        let s = id.to_string();
-        segs.push(s.strip_prefix("r#").unwrap_or(&s).to_string());
+        segs.push(crate::scan::unraw(id));
         j += 1;
         if toks.get(j).is_some_and(|t| is_punct(t, ':'))
             && toks.get(j + 1).is_some_and(|t| is_punct(t, ':'))
@@ -971,7 +990,8 @@ fn line_of(t: &TokenTree) -> usize {
 /// Hits of both kinds in one token stream (recursively).
 struct Hits<'a> {
     pats: &'a [(String, Vec<Word>)],
-    attrs: &'a [String],
+    /// `(name as configured, name with `r#` stripped from each segment)`.
+    attrs: &'a [(String, String)],
     pat_hits: Vec<(String, usize)>,
     attr_hits: Vec<(String, usize)>,
 }
@@ -999,8 +1019,10 @@ impl Hits<'_> {
                     attr_names(&body, &mut names);
                     let line = line_of(&toks[i]);
                     for n in names {
-                        if self.attrs.contains(&n) {
-                            self.attr_hits.push((n, line));
+                        for (cfg, norm) in self.attrs {
+                            if *norm == n {
+                                self.attr_hits.push((cfg.clone(), line));
+                            }
                         }
                     }
                 }
@@ -1042,6 +1064,13 @@ pub fn lexical_hits(
     }
     crate::scan::check_shape(src)?;
     let pats: Vec<(String, Vec<Word>)> = patterns.iter().map(|p| (p.clone(), compile(p))).collect();
+    let attrs: Vec<(String, String)> = attributes
+        .iter()
+        .map(|a| {
+            let norm: Vec<String> = a.split("::").map(|s| crate::scan::unraw(&s)).collect();
+            (a.clone(), norm.join("::"))
+        })
+        .collect();
     std::thread::scope(|sc| {
         std::thread::Builder::new()
             .stack_size(1 << 30)
@@ -1051,7 +1080,7 @@ pub fn lexical_hits(
                     .map_err(|e: proc_macro2::LexError| e.to_string())?;
                 let mut h = Hits {
                     pats: &pats,
-                    attrs: attributes,
+                    attrs: &attrs,
                     pat_hits: Vec::new(),
                     attr_hits: Vec::new(),
                 };
