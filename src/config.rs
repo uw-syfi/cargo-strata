@@ -63,7 +63,7 @@ pub struct Config {
     /// Types (or functions) that only listed files may construct.
     #[serde(default, rename = "authority")]
     pub authority: Vec<Authority>,
-    /// Token patterns allowed only in listed files.
+    /// Token patterns and attributes allowed only in listed files.
     #[serde(default, rename = "forbid")]
     pub forbids: Vec<Forbid>,
 }
@@ -77,8 +77,16 @@ pub struct Forbid {
     /// tokens at one nesting level. A word is an identifier, a `a::b` path,
     /// `name(` (a call: the identifier followed by a parenthesized group, not
     /// preceded by `.` or `:`) or `name()` (call with no arguments).
+    #[serde(default)]
     pub patterns: Vec<String>,
-    /// Files (globs relative to the workspace root) where the patterns are allowed.
+    /// Attribute names (paths such as `path` or `verifier::external_body`):
+    /// any application `#[x ..]` or `#![x ..]`, also inside
+    /// `cfg_attr(pred, ..)` and behind `unsafe(..)`. At least one of
+    /// `patterns` and `attributes` must be non-empty.
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    /// Files (globs relative to the workspace root) where the patterns and
+    /// attributes are allowed.
     #[serde(default)]
     pub allow: Vec<String>,
     /// Crates (name globs) checked; default all.
@@ -100,7 +108,20 @@ pub struct Forbid {
 #[serde(deny_unknown_fields)]
 pub struct ForbidExempt {
     pub file: String,
-    pub pattern: String,
+    /// One of the forbid's `patterns`; set exactly one of `pattern` and
+    /// `attribute`.
+    pub pattern: Option<String>,
+    /// One of the forbid's `attributes`.
+    pub attribute: Option<String>,
+}
+
+impl ForbidExempt {
+    /// Is this the exemption of hit `what` (a pattern, or an attribute when
+    /// `attr`) in `file`?
+    pub fn covers(&self, file: &str, what: &str, attr: bool) -> bool {
+        let want = if attr { &self.attribute } else { &self.pattern };
+        self.file == file && want.as_deref() == Some(what)
+    }
 }
 
 fn src_dir() -> Vec<String> {

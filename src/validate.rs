@@ -283,5 +283,70 @@ pub fn validate(
             }
         }
     }
+    forbids(&mut out, f, &lines, cfg);
     (out, warn)
+}
+
+/// A Rust path of identifiers, `a` or `a::b` (an attribute name).
+fn is_attr_name(s: &str) -> bool {
+    s.split("::").all(|seg| {
+        let mut c = seg.chars();
+        c.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && c.all(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// `[[forbid]]`: something to forbid, well-formed attribute names, and
+/// exemptions that name one of the forbid's own patterns or attributes.
+fn forbids(out: &mut Vec<String>, f: &str, lines: &Lines, cfg: &Config) {
+    let headers: Vec<usize> = (0..lines.tables.len())
+        .filter(|&t| lines.tables[t].0 == "forbid")
+        .collect();
+    for (i, fb) in cfg.forbids.iter().enumerate() {
+        let Some(&t) = headers.get(i) else { break };
+        if fb.patterns.is_empty() && fb.attributes.is_empty() {
+            out.push(format!(
+                "{f}:{}: forbid `{}`: needs `patterns` or `attributes`",
+                lines.tables[t].1 + 1,
+                fb.name
+            ));
+        }
+        for a in &fb.attributes {
+            if !is_attr_name(a) {
+                out.push(format!(
+                    "{f}:{}: forbid `{}`: `attributes` entry `{a}` is not an attribute name; write the path alone, as in `path` or `verifier::external_body`",
+                    lines.item_line(t, "attributes", a),
+                    fb.name
+                ));
+            }
+        }
+        // `[[forbid.exempt]]` tables up to the next `[[forbid]]`, in order.
+        let next = headers.get(i + 1).copied().unwrap_or(lines.tables.len());
+        let exempts: Vec<usize> = (t + 1..next)
+            .filter(|&e| lines.tables[e].0 == "forbid.exempt")
+            .collect();
+        for (k, e) in fb.exempt.iter().enumerate() {
+            let at = exempts
+                .get(k)
+                .map_or(lines.tables[t].1 + 1, |&x| lines.tables[x].1 + 1);
+            let problem = match (&e.pattern, &e.attribute) {
+                (Some(_), Some(_)) | (None, None) => {
+                    Some("set exactly one of `pattern` and `attribute`".to_string())
+                }
+                (Some(p), None) if !fb.patterns.contains(p) => {
+                    Some(format!("pattern `{p}` is not in its `patterns`"))
+                }
+                (None, Some(a)) if !fb.attributes.contains(a) => {
+                    Some(format!("attribute `{a}` is not in its `attributes`"))
+                }
+                _ => None,
+            };
+            if let Some(p) = problem {
+                out.push(format!(
+                    "{f}:{at}: forbid `{}`: exemption for `{}`: {p}",
+                    fb.name, e.file
+                ));
+            }
+        }
+    }
 }

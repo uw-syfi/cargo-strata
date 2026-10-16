@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### Rules
+
+* `attributes` on `[[forbid]]`: attribute names (`path`, `no_mangle`,
+  `verifier::external_body`) allowed only in the `allow` files, with the same
+  `crates`, `dirs`, `require_comment` and exemptions as `patterns`. Matches
+  outer and inner attributes anywhere, inside `cfg_attr(..)` at any depth,
+  behind `unsafe(..)`, in macro bodies and in `verus!`; names in arguments,
+  `cfg_attr` predicates, comments and strings do not match. Replaces banning
+  the identifier `path` as a stand-in for `#[path = ..]`.
+* `[[forbid.exempt]]` takes `attribute = ".."` as an alternative to
+  `pattern = ".."`.
+
+### Breaking
+
+* `patterns` on `[[forbid]]` is optional; a forbid with neither `patterns`
+  nor `attributes` is a configuration error naming its line.
+* A `[[forbid.exempt]]` must set exactly one of `pattern` and `attribute`,
+  and it must name one of its forbid's own `patterns` or `attributes`; before,
+  an exemption of an unlisted pattern was reported as stale (exit 1), now it
+  is a configuration error naming its line (exit 2). Migration: delete the
+  exemption, or add the pattern to the forbid.
+* An `attributes` entry that is not a path (`"#[path]"`, `"link = .."`) is a
+  configuration error naming its line.
+
+### API
+
+* `facts::attribute_hits` and `facts::lexical_hits` (patterns and attributes
+  in one pass). `Forbid` gains `attributes`, `FileInfo` gains `attr_hits`,
+  and `ForbidExempt::pattern` becomes `Option<String>` beside a new
+  `attribute` (code that builds these structs literally must add the fields).
+
+### Testing
+
+* `tests/prop_attributes.rs`: generated attributes in every position against
+  generated truth, and forbid verdicts against an oracle. Mutating the
+  `cfg_attr` predicate skip, `unsafe(..)` transparency, raw-identifier
+  handling, inner attributes or the exemption bookkeeping fails it.
+
 ## 0.2.0
 
 ### Rules

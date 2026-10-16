@@ -8,7 +8,11 @@ fn run(name: &str, src: String) {
         .spawn(move || {
             let _ = scan_source(&src, true, true);
             let _ = cargo_strata::facts::scan_facts(&src, true, false);
-            let _ = cargo_strata::facts::token_hits(&src, &["assume(".into(), "a::b".into()]);
+            let _ = cargo_strata::facts::lexical_hits(
+                &src,
+                &["assume(".into(), "a::b".into()],
+                &["path".into()],
+            );
         })
         .unwrap();
     h.join().unwrap_or_else(|_| panic!("{name} panicked"));

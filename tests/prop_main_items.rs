@@ -104,6 +104,7 @@ fn run(src: &str, items: Option<Vec<String>>) -> BTreeSet<usize> {
         src: src.to_string(),
         facts: scan_facts(src, VERUS, false).unwrap_or_else(|e| panic!("{e}\n{src}")),
         hits: vec![],
+        attr_hits: vec![],
     };
     let crates = vec![CrateInfo {
         name: "c".into(),
