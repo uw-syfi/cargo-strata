@@ -4,6 +4,12 @@
 
 ### Fixes
 
+* Forbid patterns no longer match lifetimes. A lifetime (`'static`, `'a`,
+  a label `'outer`) is its own token: the pattern `static` catches `static`
+  items (`static X`, `static mut`, `pub static`, inside `thread_local!` and
+  other macro bodies, in `verus!`) but not `&'static str`, `T: 'static` or
+  `impl Trait + 'static`. A pattern word written with a leading `'`
+  (`'static`) matches the lifetime and nothing else.
 * Raw identifiers no longer bypass rules. Every name is compared with its
   `r#` prefix removed: forbid patterns (`r#include!("x")` matches
   `include`, `r#Justifies` matches `Justifies`), forbid attributes, module
@@ -18,6 +24,8 @@
 ### Testing
 
 * `tests/raw_identifiers.rs`: one case per rule kind with raw spellings.
+* `tests/lifetimes.rs`: `static` items against `'static` lifetimes, lifetime
+  pattern words, end to end.
 
 ## 0.3.0
 
