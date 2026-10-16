@@ -150,6 +150,12 @@ and the run continues; the rules see nothing of that file. `--strict` makes it
 `error[parse]` (exit 2). Read errors and the size and nesting limits below are
 always errors.
 
+A raw identifier names what the plain one does: every rule compares names
+with the `r#` prefix removed, in the source (`r#include!`, `crate::r#memory`,
+`#[r#path]`, `use r#core::x`) and in `strata.toml` (a pattern, attribute or
+module may be written either way). Keywords stay keywords only unprefixed:
+`r#unsafe { }` is not an unsafe block.
+
 Without the `verus` feature, `verus_syn` is not a dependency: nothing extra is
 compiled, and nothing extra runs.
 
@@ -322,7 +328,9 @@ bodies (including `macro_rules!` templates) and in `verus!`. The name is the
 attribute's path: arguments are not part of it (`#[verifier(external_body)]`
 is `verifier`), and names in arguments or in a `cfg_attr` predicate do not
 match. `cfg_attr` itself is a name. Doc comments are `doc` attributes. A hit
-is reported at the line of its `#`. Comments, strings and identifiers outside
+is reported at the line of its `#`. A pattern word or attribute segment
+matches its raw spelling too (`include` matches `r#include!`, `path` matches
+`#[r#path]`). Comments, strings and identifiers outside
 an attribute never match; a pattern `path` matches the identifier anywhere,
 the attribute `path` only `#[path ..]`.
 

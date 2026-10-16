@@ -95,17 +95,26 @@ macro_rules! items_collector {
 
             fn is_cfg_test(attrs: &[$syn::Attribute]) -> bool {
                 attrs.iter().any(|a| {
-                    a.path().is_ident("cfg")
-                        && match &a.meta {
-                            $syn::Meta::List(l) => l.tokens.to_string().trim() == "test",
-                            _ => false,
+                    crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "cfg",
+                    ) && match &a.meta {
+                        $syn::Meta::List(l) => {
+                            crate::scan::unraw(&l.tokens.to_string().trim()) == "test"
                         }
+                        _ => false,
+                    }
                 })
             }
 
             fn path_attr(attrs: &[$syn::Attribute]) -> Option<String> {
                 for a in attrs {
-                    if a.path().is_ident("path") {
+                    if crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "path",
+                    ) {
                         if let $syn::Meta::NameValue(nv) = &a.meta {
                             if let $syn::Expr::Lit($syn::ExprLit {
                                 lit: $syn::Lit::Str(s),
@@ -150,13 +159,13 @@ macro_rules! items_collector {
             ) {
                 match t {
                     $syn::UseTree::Path(p) => {
-                        prefix.push(p.ident.to_string());
+                        prefix.push(crate::scan::unraw(&p.ident));
                         flatten(&p.tree, prefix, public, line, v);
                         prefix.pop();
                     }
                     $syn::UseTree::Name(n) => {
                         let mut path = prefix.clone();
-                        let name = n.ident.to_string();
+                        let name = crate::scan::unraw(&n.ident);
                         if name == "self" {
                             if let Some(last) = prefix.last() {
                                 v.bind(path, Some(last.clone()), false, public, line);
@@ -168,11 +177,11 @@ macro_rules! items_collector {
                     }
                     $syn::UseTree::Rename(n) => {
                         let mut path = prefix.clone();
-                        let orig = n.ident.to_string();
+                        let orig = crate::scan::unraw(&n.ident);
                         if orig != "self" {
                             path.push(orig);
                         }
-                        let alias = n.rename.to_string();
+                        let alias = crate::scan::unraw(&n.rename);
                         let name = (alias != "_").then_some(alias);
                         v.bind(path, name, false, public, line);
                     }
@@ -191,7 +200,7 @@ macro_rules! items_collector {
                         p.path
                             .segments
                             .iter()
-                            .map(|s| s.ident.to_string())
+                            .map(|s| crate::scan::unraw(&s.ident))
                             .collect(),
                     ),
                     _ => None,
@@ -238,27 +247,27 @@ macro_rules! items_collector {
                         return;
                     }
                     match i {
-                        I::Struct(x) => self.def(x.ident.to_string(), DefKind::Other),
-                        I::Enum(x) => self.def(x.ident.to_string(), DefKind::Other),
-                        I::Union(x) => self.def(x.ident.to_string(), DefKind::Other),
-                        I::Trait(x) => self.def(x.ident.to_string(), DefKind::Other),
-                        I::Fn(x) => self.def(x.sig.ident.to_string(), DefKind::Other),
-                        I::Const(x) => self.def(x.ident.to_string(), DefKind::Other),
-                        I::Static(x) => self.def(x.ident.to_string(), DefKind::Other),
+                        I::Struct(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
+                        I::Enum(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
+                        I::Union(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
+                        I::Trait(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
+                        I::Fn(x) => self.def(crate::scan::unraw(&x.sig.ident), DefKind::Other),
+                        I::Const(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
+                        I::Static(x) => self.def(crate::scan::unraw(&x.ident), DefKind::Other),
                         I::Type(x) => {
                             let kind = simple_path(&x.ty).map_or(DefKind::Other, DefKind::Alias);
-                            self.def(x.ident.to_string(), kind)
+                            self.def(crate::scan::unraw(&x.ident), kind)
                         }
                         I::ExternCrate(x) => {
                             let name = x
                                 .rename
                                 .as_ref()
-                                .map(|(_, r)| r.to_string())
-                                .unwrap_or_else(|| x.ident.to_string());
+                                .map(|(_, r)| crate::scan::unraw(r))
+                                .unwrap_or_else(|| crate::scan::unraw(&x.ident));
                             if x.rename.is_some() && name != "_" {
                                 let line = x.extern_token.span.start().line;
                                 self.bind(
-                                    vec![x.ident.to_string()],
+                                    vec![crate::scan::unraw(&x.ident)],
                                     Some(name),
                                     false,
                                     false,
@@ -305,7 +314,7 @@ macro_rules! items_collector {
                     if self.skip_cfg_test && is_cfg_test(&i.attrs) {
                         return;
                     }
-                    let name = i.ident.to_string();
+                    let name = crate::scan::unraw(&i.ident);
                     match &i.content {
                         Some(_) => {
                             self.inline.push(name);

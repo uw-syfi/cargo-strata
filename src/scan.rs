@@ -52,6 +52,26 @@ pub struct Scan {
     pub items: crate::resolve::Items,
 }
 
+/// An identifier's name without the raw prefix: `r#type` and `type` name the
+/// same item, module, crate, macro or attribute, so every name the rules
+/// compare is taken through this.
+pub fn unraw(id: &impl std::fmt::Display) -> String {
+    let s = id.to_string();
+    match s.strip_prefix("r#") {
+        Some(n) => n.to_string(),
+        None => s,
+    }
+}
+
+/// Is the path (segments, leading `::`) the single name `name`, raw or not?
+pub fn is_named<I: std::fmt::Display>(
+    mut segs: impl Iterator<Item = I>,
+    leading_colon: bool,
+    name: &str,
+) -> bool {
+    !leading_colon && segs.next().is_some_and(|s| unraw(&s) == name) && segs.next().is_none()
+}
+
 pub fn is_root_kw(s: &str) -> bool {
     matches!(s, "crate" | "self" | "super")
 }
@@ -65,7 +85,7 @@ pub fn scan_tokens(ts: TokenStream, inline: &[String], out: &mut Vec<RawRef>) {
             TokenTree::Group(g) => scan_tokens(g.stream(), inline, out),
             TokenTree::Ident(id) if is_root_kw(&id.to_string()) => {
                 let line = id.span().start().line;
-                let mut segs = vec![id.to_string()];
+                let mut segs = vec![unraw(id)];
                 let mut j = i + 1;
                 while j + 2 < toks.len() {
                     let (TokenTree::Punct(a), TokenTree::Punct(b), TokenTree::Ident(n)) =
@@ -76,7 +96,7 @@ pub fn scan_tokens(ts: TokenStream, inline: &[String], out: &mut Vec<RawRef>) {
                     if a.as_char() != ':' || b.as_char() != ':' {
                         break;
                     }
-                    segs.push(n.to_string());
+                    segs.push(unraw(n));
                     j += 3;
                 }
                 if segs.len() >= 2 {
@@ -111,17 +131,26 @@ macro_rules! scanner {
 
             fn is_cfg_test(attrs: &[$syn::Attribute]) -> bool {
                 attrs.iter().any(|a| {
-                    a.path().is_ident("cfg")
-                        && match &a.meta {
-                            $syn::Meta::List(l) => l.tokens.to_string().trim() == "test",
-                            _ => false,
+                    crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "cfg",
+                    ) && match &a.meta {
+                        $syn::Meta::List(l) => {
+                            crate::scan::unraw(&l.tokens.to_string().trim()) == "test"
                         }
+                        _ => false,
+                    }
                 })
             }
 
             fn path_attr(attrs: &[$syn::Attribute]) -> Option<String> {
                 for a in attrs {
-                    if a.path().is_ident("path") {
+                    if crate::scan::is_named(
+                        a.path().segments.iter().map(|s| &s.ident),
+                        a.path().leading_colon.is_some(),
+                        "path",
+                    ) {
                         if let $syn::Meta::NameValue(nv) = &a.meta {
                             if let $syn::Expr::Lit($syn::ExprLit {
                                 lit: $syn::Lit::Str(s),
@@ -139,21 +168,21 @@ macro_rules! scanner {
             fn flatten(t: &$syn::UseTree, prefix: &mut Vec<String>, line: usize, v: &mut V) {
                 match t {
                     $syn::UseTree::Path(p) => {
-                        prefix.push(p.ident.to_string());
+                        prefix.push(crate::scan::unraw(&p.ident));
                         flatten(&p.tree, prefix, line, v);
                         prefix.pop();
                     }
                     $syn::UseTree::Name(n) => {
                         let mut s = prefix.clone();
                         if n.ident != "self" {
-                            s.push(n.ident.to_string());
+                            s.push(crate::scan::unraw(&n.ident));
                         }
                         v.push(s, n.ident.span().start().line.max(line), false);
                     }
                     $syn::UseTree::Rename(n) => {
                         let mut s = prefix.clone();
                         if n.ident != "self" {
-                            s.push(n.ident.to_string());
+                            s.push(crate::scan::unraw(&n.ident));
                         }
                         v.push(s, n.ident.span().start().line.max(line), false);
                     }
@@ -261,8 +290,12 @@ macro_rules! scanner {
                 fn visit_path(&mut self, p: &'ast $syn::Path) {
                     if let Some(first) = p.segments.first() {
                         if p.segments.len() >= 2 {
-                            let rooted = is_root_kw(&first.ident.to_string());
-                            let segs = p.segments.iter().map(|s| s.ident.to_string()).collect();
+                            let rooted = is_root_kw(&crate::scan::unraw(&first.ident));
+                            let segs = p
+                                .segments
+                                .iter()
+                                .map(|s| crate::scan::unraw(&s.ident))
+                                .collect();
                             let line = first.ident.span().start().line;
                             let r = RawRef {
                                 segs,
@@ -285,7 +318,7 @@ macro_rules! scanner {
                     if self.skip_cfg_test && is_cfg_test(&i.attrs) {
                         return;
                     }
-                    let name = i.ident.to_string();
+                    let name = crate::scan::unraw(&i.ident);
                     match &i.content {
                         Some(_) => {
                             self.inline.push(name);
@@ -310,7 +343,7 @@ macro_rules! scanner {
                         .path
                         .segments
                         .last()
-                        .is_some_and(|s| s.ident == "verus");
+                        .is_some_and(|s| crate::scan::unraw(&s.ident) == "verus");
                     if i.ident.is_none() && !verus {
                         // Parsed as items after the file; if that fails, the
                         // tokens are scanned for `crate::` chains instead.
@@ -328,7 +361,7 @@ macro_rules! scanner {
                         .path
                         .segments
                         .last()
-                        .map(|s| s.ident.to_string())
+                        .map(|s| crate::scan::unraw(&s.ident))
                         .unwrap_or_default();
                     if last == "verus" {
                         self.out.verus.push(VerusBody {
