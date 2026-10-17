@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Rules
+
+* Module rule paths take glob patterns, one module name per segment (`*`,
+  `?`, `[..]`), in `path`, `depends_on`, `deny` and `exempt`. A pattern
+  `path` gives every module it matches a rule of its own, so
+  `path = "tools::*"` with `deny = ["tools::*"]` keeps the children of
+  `tools` from referencing each other, and new children are covered without
+  editing the config. Before, isolating N sibling modules took N rules, each
+  listing every sibling by name.
+* The rule that governs a module is the most specific one, compared segment
+  by segment from the root: a name beats a pattern, a pattern beats no
+  segment. For literal paths this is the longest rule, as before.
+
+### Breaking
+
+None for configs without patterns: literal paths select, match and report
+as before. New configuration errors, each naming its line: a malformed
+pattern or `**` in a module path, and two module rules with different paths
+that match one module equally specifically.
+
+### API
+
+* `modules::ModulePattern` (`check`, `new`, `covers`, `matches_any`,
+  `specificity`) and `modules::ambiguous_rules`. `modules::Report` gains
+  `ambiguous: Vec<AmbiguousRule>` (code that builds a `Report` literally must
+  add the field).
+
+### Testing
+
+* `tests/module_patterns.rs`: end to end on a crate of isolated tools, and
+  every pair of pattern rules against an oracle.
+
 ## 0.3.1
 
 ### Fixes
