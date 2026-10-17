@@ -111,7 +111,7 @@ error[module]: core/src/tools/b.rs:3: module `tools::b` references `tools::a` (v
 
 ```yaml
 - uses: dtolnay/rust-toolchain@stable
-- run: cargo install cargo-strata --version 0.3.1 --locked
+- run: cargo install cargo-strata --version 0.4.0 --locked
 - run: cargo strata check
 ```
 
