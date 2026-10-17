@@ -1,4 +1,6 @@
-//! Module-level rules inside a crate: path-based, no name resolution.
+//! Module-level rules inside a crate: path-based, with optional name
+//! resolution. Module paths in rules may hold per-segment glob patterns
+//! ([`ModulePattern`]).
 
 use crate::config::{Config, CrateRule, ModuleRule};
 use crate::resolve::{Res, Table};
@@ -30,9 +32,21 @@ pub struct UnknownModule {
     pub name: String,
 }
 
+/// A module that two module rules with different paths match equally
+/// specifically (a configuration error: neither rule can be chosen).
+#[derive(Debug, PartialEq, Eq)]
+pub struct AmbiguousRule {
+    /// The module both rules match, `a::b`.
+    pub module: String,
+    /// The two rules' `path`s, in config order.
+    pub first: String,
+    pub second: String,
+}
+
 #[derive(Default)]
 pub struct Report {
     pub unknown: Vec<UnknownModule>,
+    pub ambiguous: Vec<AmbiguousRule>,
     pub violations: Vec<ModViolation>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
@@ -53,6 +67,153 @@ fn split(p: &str) -> Vec<String> {
 
 fn is_prefix(p: &[String], of: &[String]) -> bool {
     of.len() >= p.len() && of[..p.len()] == *p
+}
+
+/// Does a module path segment use glob syntax? Module names are identifiers,
+/// so `*`, `?` and `[` never occur in a literal name.
+fn is_glob_segment(s: &str) -> bool {
+    s.contains(['*', '?', '['])
+}
+
+#[derive(Debug, Clone)]
+enum Segment {
+    Name(String),
+    Glob(glob::Pattern),
+}
+
+/// A module path as written in a module rule (`path`, `depends_on`, `deny`,
+/// `exempt`): segments separated by `::`, a leading `crate::` allowed. Each
+/// segment is a module name (raw or not) or a glob pattern (`*`, `?`,
+/// `[..]`) that matches exactly one module name: `tools::*` names every
+/// child of `tools`, `*` every top-level module, never the crate root.
+#[derive(Debug, Clone)]
+pub struct ModulePattern {
+    segs: Vec<Segment>,
+}
+
+impl ModulePattern {
+    /// Why `path` is not a valid module pattern, if it is not. A segment
+    /// with glob syntax must be a valid glob without `**` (a pattern matches
+    /// one module name; there is no recursive form).
+    pub fn check(path: &str) -> Result<(), String> {
+        for seg in path.split("::").filter(|s| is_glob_segment(s)) {
+            let seg = crate::scan::unraw(&seg);
+            if seg.contains("**") {
+                return Err(format!(
+                    "`{seg}`: `**` is not supported; `*` matches one module name"
+                ));
+            }
+            glob::Pattern::new(&seg).map_err(|e| format!("`{seg}`: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Parse `path`. A segment that fails [`ModulePattern::check`] is kept
+    /// as a literal name, which matches no module.
+    pub fn new(path: &str) -> Self {
+        let segs = split(path)
+            .into_iter()
+            .map(|s| match glob::Pattern::new(&s) {
+                Ok(p) if is_glob_segment(&s) && !s.contains("**") => Segment::Glob(p),
+                _ => Segment::Name(s),
+            })
+            .collect();
+        ModulePattern { segs }
+    }
+
+    /// Number of segments: the depth of the modules it names.
+    pub fn len(&self) -> usize {
+        self.segs.len()
+    }
+
+    /// Does it name the crate root (no segments)?
+    pub fn is_empty(&self) -> bool {
+        self.segs.is_empty()
+    }
+
+    /// Does it name the module `m[..self.len()]`, that is, is `m` that
+    /// module or inside it? For a literal path this is the prefix test.
+    pub fn covers(&self, m: &[String]) -> bool {
+        m.len() >= self.segs.len()
+            && self.segs.iter().zip(m).all(|(p, s)| match p {
+                Segment::Name(n) => n == s,
+                Segment::Glob(g) => g.matches(s),
+            })
+    }
+
+    /// Does it name at least one module in `known`?
+    pub fn matches_any(&self, known: &HashSet<Vec<String>>) -> bool {
+        known
+            .iter()
+            .any(|k| k.len() == self.segs.len() && self.covers(k))
+    }
+
+    /// Specificity, compared segment by segment from the root: a name beats
+    /// a pattern, and a pattern beats no segment. Among rules that cover a
+    /// module the greatest wins; for literal paths that is the longest.
+    pub fn specificity(&self) -> Vec<u8> {
+        self.segs
+            .iter()
+            .map(|s| match s {
+                Segment::Name(_) => 2,
+                Segment::Glob(_) => 1,
+            })
+            .collect()
+    }
+}
+
+/// The rule that governs module `cur`: of the rules whose path covers it,
+/// the most specific (the last one in config order among equals).
+fn source_rule<'r, 'm>(
+    parsed: &'r [(ModulePattern, &'m ModuleRule)],
+    cur: &[String],
+) -> Option<(usize, &'r (ModulePattern, &'m ModuleRule))> {
+    parsed
+        .iter()
+        .enumerate()
+        .filter(|(_, (p, _))| p.covers(cur))
+        .max_by_key(|(_, (p, _))| p.specificity())
+}
+
+/// Modules in `known` that two rules with different paths govern equally
+/// specifically, each pair reported once at the shallowest such module.
+pub fn ambiguous_rules(
+    modules: &[&ModuleRule],
+    known: &HashSet<Vec<String>>,
+) -> Vec<AmbiguousRule> {
+    let parsed: Vec<(ModulePattern, &ModuleRule)> = modules
+        .iter()
+        .map(|m| (ModulePattern::new(&m.path), *m))
+        .collect();
+    let mut mods: Vec<&Vec<String>> = known.iter().collect();
+    mods.sort_by(|a, b| (a.len(), a).cmp(&(b.len(), b)));
+    let mut out: Vec<AmbiguousRule> = Vec::new();
+    for m in mods {
+        let Some((_, (best, _))) = source_rule(&parsed, m) else {
+            continue;
+        };
+        let top: Vec<&str> = parsed
+            .iter()
+            .filter(|(p, _)| p.covers(m) && p.specificity() == best.specificity())
+            .map(|(_, r)| r.path.as_str())
+            .collect();
+        for (i, a) in top.iter().enumerate() {
+            for b in &top[i + 1..] {
+                if a != b
+                    && !out
+                        .iter()
+                        .any(|x| (x.first.as_str(), x.second.as_str()) == (*a, *b))
+                {
+                    out.push(AmbiguousRule {
+                        module: m.join("::"),
+                        first: a.to_string(),
+                        second: b.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `mod r#type;` lives in `type.rs`: the file system name of a module.
@@ -220,6 +381,7 @@ pub fn check_crate(
         .then(|| Table::build(&known, files.iter().map(|f| (&f.module[..], &f.scan.items))));
     let (viol, warns) = evaluate_with(krate, &modules, &known, &units, ws_root, table.as_ref());
     rep.violations = viol;
+    rep.ambiguous = ambiguous_rules(&modules, &known);
     // An unknown name is a configuration error (reported by the caller with
     // its config line), not a warning.
     rep.warnings.extend(
@@ -228,7 +390,7 @@ pub fn check_crate(
             .filter(|w| !w.contains("matches no module")),
     );
     for m in &modules {
-        let is_known = |n: &str| known.contains(&split(n));
+        let is_known = |n: &str| ModulePattern::new(n).matches_any(&known);
         if !is_known(&m.path) {
             rep.unknown.push(UnknownModule {
                 rule: m.path.clone(),
@@ -371,10 +533,23 @@ pub fn evaluate_with(
     table: Option<&Table>,
 ) -> (Vec<ModViolation>, Vec<String>) {
     let mut rep = Report::default();
-    let parsed: Vec<(Vec<String>, &ModuleRule)> =
-        modules.iter().map(|m| (split(&m.path), *m)).collect();
+    let parsed: Vec<(ModulePattern, &ModuleRule)> = modules
+        .iter()
+        .map(|m| (ModulePattern::new(&m.path), *m))
+        .collect();
+    let lists: Vec<[Vec<ModulePattern>; 3]> = modules
+        .iter()
+        .map(|m| {
+            let pats = |l: &[String]| l.iter().map(|d| ModulePattern::new(d)).collect();
+            [
+                pats(m.depends_on.as_deref().unwrap_or(&[])),
+                pats(&m.deny),
+                pats(&m.exempt),
+            ]
+        })
+        .collect();
     for (p, m) in &parsed {
-        if !known.contains(p) {
+        if !p.matches_any(known) {
             rep.warnings.push(format!(
                 "crate `{krate}`: module rule `{}` matches no module",
                 m.path
@@ -386,15 +561,18 @@ pub fn evaluate_with(
         let bare: &[crate::scan::RawRef] = if table.is_some() { &f.scan.bare } else { &[] };
         for r in f.scan.refs.iter().chain(bare) {
             let cur = [&f.module[..], &r.inline[..]].concat();
-            let Some((src_idx, (_, src_rule))) = parsed
-                .iter()
-                .enumerate()
-                .filter(|(_, (p, _))| is_prefix(p, &cur))
-                .max_by_key(|(_, (p, _))| p.len())
-            else {
+            let Some((src_idx, (src_pat, src_rule))) = source_rule(&parsed, &cur) else {
                 continue;
             };
-            let sp = split(&src_rule.path);
+            let [allow_pats, deny_pats, exempt_pats] = &lists[src_idx];
+            // The module the rule governs here: for a pattern, the module it
+            // matched, so `tools::*` keeps each tool's own subtree its own.
+            let sp = &cur[..src_pat.len()];
+            let label = if src_pat.specificity().iter().all(|&s| s == 2) {
+                format!("`{}`", src_rule.path)
+            } else {
+                format!("`{}` (rule `{}`)", sp.join("::"), src_rule.path)
+            };
             // `(target, as_written)`: depends_on judges only the path as
             // written (reaching an allowed facade is allowed); deny judges both.
             let mut targets: Vec<(Vec<String>, bool)> = Vec::new();
@@ -415,24 +593,23 @@ pub fn evaluate_with(
                 }
             }
             for (target, as_written) in targets {
-                if is_prefix(&sp, &target) {
+                if is_prefix(sp, &target) {
                     continue;
                 }
-                let reason =
-                    if let Some(d) = src_rule.deny.iter().find(|d| is_prefix(&split(d), &target)) {
-                        Some(format!("`{}` denies `{d}`", src_rule.path))
-                    } else if let (true, Some(allow)) = (as_written, &src_rule.depends_on) {
-                        (!allow.iter().any(|d| is_prefix(&split(d), &target)))
-                            .then(|| format!("`{}` does not list it in depends_on", src_rule.path))
-                    } else {
-                        None
-                    };
+                let reason = if let Some(i) = deny_pats.iter().position(|d| d.covers(&target)) {
+                    Some(format!("{label} denies `{}`", src_rule.deny[i]))
+                } else if let (true, Some(_)) = (as_written, &src_rule.depends_on) {
+                    (!allow_pats.iter().any(|d| d.covers(&target)))
+                        .then(|| format!("{label} does not list it in depends_on"))
+                } else {
+                    None
+                };
                 if reason.is_some() {
                     // An exemption covers the reference; every matching entry
                     // counts as used so staleness never depends on order.
                     let mut exempted = false;
-                    for (i, e) in src_rule.exempt.iter().enumerate() {
-                        if is_prefix(&split(e), &target) {
+                    for (i, e) in exempt_pats.iter().enumerate() {
+                        if e.covers(&target) {
                             used.insert((src_idx, i));
                             exempted = true;
                         }

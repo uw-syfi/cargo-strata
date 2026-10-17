@@ -94,6 +94,19 @@ error[module]: core/src/memory.rs:2: module `memory` references `engine` (via `c
 itself and the listed modules. References are followed through `use` trees,
 re-exports, globs and renames.
 
+A module path may hold glob patterns, one module name per segment. To keep
+every tool in `tools` from reaching any other, without naming each one:
+
+```toml
+[[crate.module]]
+path = "tools::*"      # one rule per child of `tools`
+deny = ["tools::*"]    # every other child; a tool's own subtree stays its own
+```
+
+```
+error[module]: core/src/tools/b.rs:3: module `tools::b` references `tools::a` (via `super::a::run`): `tools::b` (rule `tools::*`) denies `tools::*`
+```
+
 ### CI
 
 ```yaml
@@ -223,15 +236,32 @@ their rules combine.
 
 | Key | Meaning |
 | --- | --- |
-| `path` | Module path from the crate root, `a::b` (a leading `crate::` is allowed) |
+| `path` | Module path from the crate root, `a::b` (a leading `crate::` is allowed). May be a pattern (below): the rule then applies to each module it matches |
 | `depends_on` | If present, the module (and its submodules, unless a more specific rule exists) may reference only itself and these modules (prefix match) |
 | `deny` | Modules it must never reference |
 | `exempt` | Modules it may reference although `deny` or `depends_on` rejects them (a grandfathered edge). An entry that suppresses no reference is reported as stale (`error[module]` with the config line); an unknown name is a configuration error |
 
+Patterns: each `::` segment of a `path`, `depends_on`, `deny` or `exempt`
+entry is a module name or a glob (`*`, `?`, `[..]`) that matches one module
+name, so `*` is every top-level module (never the crate root), `tools::*`
+every child of `tools`, and `*::*` every module two levels down. There is no
+recursive form; `**` is a configuration error, as is a malformed glob. A
+pattern that matches no module is an unknown name, as for a literal. A
+pattern `path` gives each module it matches a rule of its own, with that
+module's own subtree, so `path = "tools::*"` with `deny = ["tools::*"]`
+isolates the children of `tools` from each other, and `path = "*"` with
+`deny = ["*"]` the top-level modules. In messages the rule reads
+`` `tools::b` (rule `tools::*`) ``.
+
 Resolution: a reference's target is the longest prefix of its path that names
-a known module; the source is the longest configured rule that is a prefix of
-the file's module path. References into the source rule's own subtree are
-always allowed. References to items at the crate root are ignored. A rule that
+a known module. The source is the most specific configured rule whose path
+matches the file's module path or a prefix of it, compared segment by
+segment from the root: a name beats a pattern, and a pattern beats no
+segment. For literal paths that is the longest rule; with patterns, `wiring`
+governs `wiring::template` over `*::*`, and `tools::*` governs `tools::a`
+over `tools`. Two rules with different paths that match a module equally
+specifically (`t*::*` and `*e*::*` on `template::a`) are a configuration
+error. References into the source rule's own subtree are always allowed. References to items at the crate root are ignored. A rule that
 names no module produces a warning. With `resolve`, a reference is also
 attributed to the module that defines what it names (below); `deny` applies to
 both the module as written and the defining module, `depends_on` to the module
@@ -542,6 +572,12 @@ testing without `cargo metadata` or the file system.
   ground truth by construction. `tests/resolve_cases.rs`: the cases the
   path-based version missed, end to end with `resolve` on and off, including a
   re-export through a workspace dependency.
+* `tests/module_patterns.rs`: patterns in module rules on a crate of
+  isolated tools (top-level and grouped, a wiring module that composes
+  them): `self`/`super`/`crate::` and bare paths, use groups, crate-root
+  re-exports, raw identifiers, nested modules, lifetimes; specificity,
+  ambiguity and malformed patterns; and every pair of rules over ten
+  patterns against an oracle written from this document.
 * `tests/corpus_regressions.rs`: bugs found on the external workspaces,
   minimized (raw-identifier modules, use-tree line numbers, renamed
   dependencies). `tests/bad_config.rs`: each configuration error names its

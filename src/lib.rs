@@ -229,6 +229,23 @@ pub fn run_with(
             });
             out.errors += 1;
         }
+        for a in rep.ambiguous {
+            let line = lines
+                .find_module(&pkg.name, &a.second)
+                .or_else(|| {
+                    rules
+                        .iter()
+                        .find_map(|r| lines.find_module(&r.name, &a.second))
+                })
+                .map(|t| lines.item_line(t, "path", &a.second))
+                .unwrap_or(0);
+            out.lines.push(format!(
+                "error[config]: {cfg_name}:{line}: crate `{}`: module `{}` matches module rules `{}` and `{}` equally specifically; \
+                 make one of them more specific or merge them",
+                pkg.name, a.module, a.first, a.second
+            ));
+            out.errors += 1;
+        }
     }
     surface_check(&meta, &cfg, &ws_root, &lines, &cfg_name, strict, &mut out);
     Ok(out)

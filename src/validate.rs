@@ -283,8 +283,32 @@ pub fn validate(
             }
         }
     }
+    module_patterns(&mut out, f, &lines, cfg);
     forbids(&mut out, f, &lines, cfg);
     (out, warn)
+}
+
+/// `[[crate.module]]`: every module path (`path`, `depends_on`, `deny`,
+/// `exempt`) is a valid module pattern.
+fn module_patterns(out: &mut Vec<String>, f: &str, lines: &Lines, cfg: &Config) {
+    let headers: Vec<usize> = (0..lines.tables.len())
+        .filter(|&t| lines.tables[t].0 == "crate.module")
+        .collect();
+    for (m, &t) in cfg.crates.iter().flat_map(|r| &r.modules).zip(&headers) {
+        let entries = std::iter::once(("path", &m.path))
+            .chain(m.depends_on.iter().flatten().map(|d| ("depends_on", d)))
+            .chain(m.deny.iter().map(|d| ("deny", d)))
+            .chain(m.exempt.iter().map(|d| ("exempt", d)));
+        for (key, p) in entries {
+            if let Err(e) = crate::modules::ModulePattern::check(p) {
+                out.push(format!(
+                    "{f}:{}: module rule `{}`: `{key}` entry `{p}` is not a module pattern: {e}",
+                    lines.item_line(t, key, p),
+                    m.path
+                ));
+            }
+        }
+    }
 }
 
 /// A Rust path of identifiers, `a` or `a::b` (an attribute name).
