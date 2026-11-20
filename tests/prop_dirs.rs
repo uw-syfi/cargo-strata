@@ -48,7 +48,7 @@ proptest! {
         let denied: Vec<String> = deny.iter().map(|i| DIRS[*i].to_string()).collect();
         let groups: Vec<Layer> = (0..3).map(|g| Layer {
             name: format!("g{g}"),
-            crates: (0..6).filter(|i| group_of[*i] == g).map(|i| NAMES[i].to_string()).collect(),
+            crates: Some((0..6).filter(|i| group_of[*i] == g).map(|i| NAMES[i].to_string()).collect()),
             dir: group_dirs[g].map(|d| DIRS[d].to_string()),
             ..Default::default()
         }).collect();

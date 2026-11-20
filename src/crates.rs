@@ -1,8 +1,10 @@
 //! Crate-level rules over `cargo metadata`.
 
+use crate::axis::{Membership, agree, label, member_of};
 use crate::config::{Config, Layer, glob_match};
 use cargo_metadata::{DependencyKind, Metadata};
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct CrateViolation {
@@ -25,22 +27,35 @@ pub struct Edge {
     pub optional: bool,
 }
 
-fn axis_of(axis: &[Layer], name: &str) -> Option<usize> {
-    axis.iter()
-        .position(|l| l.crates.iter().any(|g| glob_match(g, name)))
+/// A crate of the checkout the rules judge as a workspace crate: a member,
+/// or (with `path_packages`) a path dependency that is not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    pub manifest: String,
+    /// Directory relative to the root, `/`-separated; `None` when unknown
+    /// or outside the root (then only name globs place it on an axis).
+    pub dir: Option<String>,
+    pub member: bool,
 }
 
-/// Why `from -> to` breaks the axis, if it does. Both must be members.
-fn axis_violation(axis: &[Layer], what: &str, from: &str, to: &str, kind: &str) -> Option<String> {
-    let a = axis_of(axis, from)?;
-    let l = &axis[a];
-    if let Some(g) = l.deny.iter().find(|g| glob_match(g, to)) {
+/// Why `from -> to` breaks the axis, if it does. `to` is `None` for a crate
+/// outside the axis's crates (only `deny` and `deny_normal` apply).
+fn axis_violation(
+    axis: &[Layer],
+    what: &str,
+    from: &Membership,
+    to: Option<&Membership>,
+    to_name: &str,
+    kind: &str,
+) -> Option<String> {
+    let l = &axis[from.index];
+    if let Some(g) = l.deny.iter().find(|g| glob_match(g, to_name)) {
         return Some(format!("{what} `{}` denies `{g}`", l.name));
     }
     if let Some(g) = l
         .deny_normal
         .iter()
-        .find(|g| glob_match(g, to))
+        .find(|g| glob_match(g, to_name))
         .filter(|_| kind == "normal")
     {
         return Some(format!(
@@ -48,12 +63,13 @@ fn axis_violation(axis: &[Layer], what: &str, from: &str, to: &str, kind: &str) 
             l.name
         ));
     }
-    let b = axis_of(axis, to)?;
-    match &axis[a].may_depend_on {
+    let to = to?;
+    let (a, b) = (from.index, to.index);
+    let by_name = match &l.may_depend_on {
         Some(list) => (!list.contains(&axis[b].name)).then(|| {
             format!(
                 "{what} `{}` may depend on {} only, not `{}`",
-                axis[a].name,
+                l.name,
                 quote_list(list),
                 axis[b].name
             )
@@ -61,10 +77,20 @@ fn axis_violation(axis: &[Layer], what: &str, from: &str, to: &str, kind: &str) 
         None => (b > a).then(|| {
             format!(
                 "{what} `{}` may not depend on higher {what} `{}`",
-                axis[a].name, axis[b].name
+                l.name, axis[b].name
             )
         }),
-    }
+    };
+    by_name.or_else(|| {
+        (!agree(&from.captures, &to.captures)).then(|| {
+            format!(
+                "{what} {} may depend on `{}` only where their captures agree, not on {}",
+                label(axis, from),
+                axis[b].name,
+                label(axis, to)
+            )
+        })
+    })
 }
 
 fn quote_list(l: &[String]) -> String {
@@ -97,11 +123,44 @@ fn manifest_line(manifest: &str, dep: &str) -> Option<usize> {
 /// Pure rule evaluation: workspace crates (name -> manifest path) plus edges
 /// in, `(edge, reason)` per violation out, sorted. An edge may yield several
 /// reasons. Stale exemptions and missing axis membership use `to == ""`.
+/// The crates have no directory, so only name globs place them on an axis;
+/// [`evaluate_local`] takes directories and path packages.
 pub fn evaluate(
     cfg: &Config,
     workspace: &BTreeMap<String, String>,
     edges: &[Edge],
 ) -> Vec<(Edge, String)> {
+    let locals = workspace
+        .iter()
+        .map(|(n, m)| {
+            let l = Local {
+                manifest: m.clone(),
+                dir: None,
+                member: true,
+            };
+            (n.clone(), l)
+        })
+        .collect();
+    evaluate_local(cfg, &locals, edges)
+}
+
+/// As [`evaluate`], over local crates with their directories. Edges come
+/// from members; a non-member local crate is judged as a workspace crate
+/// when it is a target.
+pub fn evaluate_local(
+    cfg: &Config,
+    locals: &BTreeMap<String, Local>,
+    edges: &[Edge],
+) -> Vec<(Edge, String)> {
+    let workspace: BTreeMap<&String, &String> = locals
+        .iter()
+        .filter(|(_, l)| l.member)
+        .map(|(n, l)| (n, &l.manifest))
+        .collect();
+    let member = |axis: &[Layer], name: &str| {
+        let dir = locals.get(name).and_then(|l| l.dir.as_deref());
+        member_of(axis, name, dir)
+    };
     let mut out: Vec<(Edge, String)> = Vec::new();
     // (crate, exemption glob, axis) that suppressed a real violation.
     let mut used: HashSet<(String, String, &'static str)> = HashSet::new();
@@ -120,7 +179,7 @@ pub fn evaluate(
             .iter()
             .filter(|r| glob_match(&r.name, &e.from))
             .collect();
-        let internal = workspace.contains_key(&e.to);
+        let internal = locals.contains_key(&e.to);
         let mut push = |reason: String| out.push((e.clone(), reason));
 
         for r in &rules {
@@ -162,7 +221,12 @@ pub fn evaluate(
                 if !on {
                     continue;
                 }
-                let Some(reason) = axis_violation(axis, what, &e.from, &e.to, e.kind) else {
+                let Some(from) = member(axis, &e.from) else {
+                    continue;
+                };
+                let to = member(axis, &e.to);
+                let Some(reason) = axis_violation(axis, what, &from, to.as_ref(), &e.to, e.kind)
+                else {
                     continue;
                 };
                 // Every matching exemption is marked used, so which of two
@@ -184,7 +248,7 @@ pub fn evaluate(
                 }
             }
         } else if e.kind == "normal"
-            && let Some(ax) = axis_of(&cfg.layers, &e.from).map(|i| &cfg.layers[i])
+            && let Some(ax) = member(&cfg.layers, &e.from).map(|m| &cfg.layers[m.index])
         {
             if let Some(g) = ax.external_deny.iter().find(|g| glob_match(g, &e.to)) {
                 push(format!(
@@ -209,12 +273,12 @@ pub fn evaluate(
     let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for e in edges
         .iter()
-        .filter(|e| e.kind == "normal" && workspace.contains_key(&e.to))
+        .filter(|e| e.kind == "normal" && locals.contains_key(&e.to))
         .filter(|e| cfg.check_optional || !e.optional)
     {
         adj.entry(&e.from).or_default().push(&e.to);
     }
-    for name in workspace.keys() {
+    for &name in workspace.keys() {
         for r in cfg
             .crates
             .iter()
@@ -232,7 +296,7 @@ pub fn evaluate(
             let mut hits: Vec<&&str> = seen.iter().filter(|n| any_glob(&r.deny_reach, n)).collect();
             hits.sort();
             for h in hits {
-                let manifest = workspace[name].clone();
+                let manifest = workspace[name].to_string();
                 out.push((
                     Edge {
                         from: name.clone(),
@@ -254,14 +318,14 @@ pub fn evaluate(
     for r in &cfg.crates {
         for (tag, list) in [("layer", &r.layer_exempt), ("group", &r.group_exempt)] {
             for g in list {
-                for name in workspace.keys().filter(|n| glob_match(&r.name, n)) {
+                for &name in workspace.keys().filter(|n| glob_match(&r.name, n)) {
                     if !used.contains(&(name.clone(), g.clone(), tag)) {
                         out.push((
                             Edge {
                                 from: name.clone(),
                                 to: g.clone(),
                                 kind: "normal",
-                                manifest: workspace[name].clone(),
+                                manifest: workspace[name].to_string(),
                                 optional: false,
                             },
                             format!("stale `{tag}_exempt`: no existing {tag} violation to this dependency"),
@@ -276,8 +340,8 @@ pub fn evaluate(
         (&cfg.layers, "layer", &cfg.require_layer),
         (&cfg.groups, "group", &cfg.require_group),
     ] {
-        for (name, manifest) in workspace {
-            if required.covers(name) && axis_of(axis, name).is_none() {
+        for (&name, &manifest) in &workspace {
+            if required.covers(name) && member(axis, name).is_none() {
                 out.push((
                     Edge {
                         from: name.clone(),
@@ -351,15 +415,38 @@ fn dep_line(manifest: &str, dep: &str, rename: Option<&str>) -> Option<usize> {
         })
 }
 
-pub fn check(meta: &Metadata, cfg: &Config) -> Vec<CrateViolation> {
+/// The crates the rules judge as workspace crates: the members and, with
+/// `path_packages`, every other package with no registry or git source.
+/// Directories are relative to `root`.
+pub fn locals(meta: &Metadata, cfg: &Config, root: &Path) -> BTreeMap<String, Local> {
+    let members: HashSet<_> = meta.workspace_members.iter().collect();
+    let mut out = BTreeMap::new();
+    for p in &meta.packages {
+        let member = members.contains(&p.id);
+        if !(member || cfg.path_packages && p.source.is_none()) {
+            continue;
+        }
+        let local = Local {
+            manifest: p.manifest_path.to_string(),
+            dir: p
+                .manifest_path
+                .parent()
+                .and_then(|d| crate::dirs::rel_dir(root, d.as_std_path())),
+            member,
+        };
+        // A member wins over a path package of the same name.
+        let slot = out.entry(p.name.to_string()).or_insert(local.clone());
+        if member {
+            *slot = local;
+        }
+    }
+    out
+}
+
+pub fn check(meta: &Metadata, cfg: &Config, root: &Path) -> Vec<CrateViolation> {
     let active = activated(meta);
     let members: HashSet<_> = meta.workspace_members.iter().collect();
-    let workspace: BTreeMap<String, String> = meta
-        .packages
-        .iter()
-        .filter(|p| members.contains(&p.id))
-        .map(|p| (p.name.to_string(), p.manifest_path.to_string()))
-        .collect();
+    let locals = locals(meta, cfg, root);
     let mut edges = Vec::new();
     let mut renames: std::collections::HashMap<(String, String), String> = Default::default();
     for pkg in meta.packages.iter().filter(|p| members.contains(&p.id)) {
@@ -383,7 +470,7 @@ pub fn check(meta: &Metadata, cfg: &Config) -> Vec<CrateViolation> {
             });
         }
     }
-    evaluate(cfg, &workspace, &edges)
+    evaluate_local(cfg, &locals, &edges)
         .into_iter()
         .map(|(e, reason)| CrateViolation {
             line: dep_line(

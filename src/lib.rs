@@ -1,3 +1,4 @@
+pub mod axis;
 pub mod config;
 pub mod crates;
 pub mod dirs;
@@ -58,51 +59,257 @@ pub fn run(manifest: Option<&Path>, config_path: Option<&Path>) -> Result<Outcom
     run_with(manifest, config_path, false)
 }
 
+/// One workspace to check: its metadata, its directory relative to the
+/// root, and its `path_deps` rule with captures substituted.
+struct Target {
+    meta: cargo_metadata::Metadata,
+    dir: String,
+    path_deps: Option<Vec<dirs::DirPattern>>,
+}
+
+fn metadata(manifest: Option<&Path>) -> Result<cargo_metadata::Metadata, String> {
+    let mut cmd = MetadataCommand::new();
+    if let Some(m) = manifest {
+        cmd.manifest_path(m);
+    }
+    cmd.exec()
+        .map_err(|e| format!("cargo metadata failed: {e}"))
+}
+
+fn canonical(p: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(p).map_err(|e| format!("cannot resolve {}: {e}", p.display()))
+}
+
 /// As [`run`]; with `strict`, a file the parser rejects is an error
 /// (`error[parse]`, exit 2) instead of a warning.
+///
+/// With `[[workspace]]` entries in the config, every workspace they match is
+/// checked, or only `manifest`'s when it is given (it must match one).
 pub fn run_with(
     manifest: Option<&Path>,
     config_path: Option<&Path>,
     strict: bool,
 ) -> Result<Outcome, String> {
-    let mut cmd = MetadataCommand::new();
-    if let Some(m) = manifest {
-        cmd.manifest_path(m);
-    }
-    let meta = cmd
-        .exec()
-        .map_err(|e| format!("cargo metadata failed: {e}"))?;
-    let ws_root: PathBuf = meta.workspace_root.clone().into();
-    let cfg_path = config_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| ws_root.join("strata.toml"));
+    let mut found = None;
+    let cfg_path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let meta = metadata(manifest)?;
+            let p = meta.workspace_root.as_std_path().join("strata.toml");
+            found = Some(meta);
+            p
+        }
+    };
     let text = std::fs::read_to_string(&cfg_path)
         .map_err(|e| format!("cannot read {}: {e}", cfg_path.display()))?;
     let cfg: config::Config =
         toml::from_str(&text).map_err(|e| format!("{}: {e}", cfg_path.display()))?;
-    let members: std::collections::HashSet<_> = meta.workspace_members.iter().collect();
-    let ws_names: std::collections::BTreeSet<String> = meta
-        .packages
-        .iter()
-        .filter(|p| members.contains(&p.id))
-        .map(|p| p.name.to_string())
-        .collect();
     let cfg_name = cfg_path.display().to_string();
     let lines = validate::Lines::new(&text);
-    let (bad, config_warnings) = validate::validate(&cfg, &text, &ws_names, &cfg_name);
+    let cfg_dir = canonical(match cfg_path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    })?;
+    let (root, targets) = targets(&cfg, &cfg_dir, &lines, &cfg_name, manifest, found)?;
+
+    let mut known: Vec<(String, Option<String>)> = Vec::new();
+    for t in &targets {
+        for (name, l) in crates::locals(&t.meta, &cfg, &root) {
+            known.push((name, l.dir));
+        }
+    }
+    known.sort();
+    known.dedup();
+    // Checking one of several workspaces sees only its crates, so a name
+    // that matches only in another is not unknown; the full run judges it.
+    let one_of_several = manifest.is_some() && !cfg.workspaces.is_empty();
+    let judged = config::Config {
+        allow_unknown_names: cfg.allow_unknown_names || one_of_several,
+        ..cfg.clone()
+    };
+    let (bad, config_warnings) = validate::validate(&judged, &text, &known, &cfg_name);
     if !bad.is_empty() {
         return Err(bad.join("\n"));
     }
+    let mut out = Outcome::default();
+    out.warnings.extend(config_warnings);
+    for t in &targets {
+        check_workspace(t, &cfg, &root, &lines, &cfg_name, strict, &mut out)?;
+    }
+    if !VERUS_FEATURE && cfg.crates.iter().any(|r| r.verus) {
+        out.warnings.push(
+            "`verus = true` is set but cargo-strata was built without the `verus` feature; \
+             `verus! { }` bodies are not checked (install with `--features verus`)"
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
+/// The root and the workspaces to check. Without `[[workspace]]`: the one
+/// workspace of `manifest` (or the current directory). With it: each
+/// directory under the root an entry matches, or only `manifest`'s.
+fn targets(
+    cfg: &config::Config,
+    cfg_dir: &Path,
+    lines: &validate::Lines,
+    cfg_name: &str,
+    manifest: Option<&Path>,
+    found: Option<cargo_metadata::Metadata>,
+) -> Result<(PathBuf, Vec<Target>), String> {
+    let explicit_root = cfg
+        .root
+        .as_ref()
+        .map(|r| canonical(&cfg_dir.join(r)))
+        .transpose()?;
+    if cfg.workspaces.is_empty() {
+        let mut meta = match found {
+            Some(m) => m,
+            None => metadata(manifest)?,
+        };
+        // Paths are compared with the root as cargo prints them; an explicit
+        // root is canonical, so read the workspace through its canonical path.
+        let root = match explicit_root {
+            Some(r) => {
+                let ws = canonical(meta.workspace_root.as_std_path())?;
+                if ws != meta.workspace_root.as_std_path() {
+                    meta = metadata(Some(&ws.join("Cargo.toml")))?;
+                }
+                r
+            }
+            None => meta.workspace_root.clone().into(),
+        };
+        let dir = dirs::rel_dir(&root, meta.workspace_root.as_std_path()).unwrap_or_default();
+        return Ok((
+            root,
+            vec![Target {
+                meta,
+                dir,
+                path_deps: None,
+            }],
+        ));
+    }
+    let root = explicit_root.unwrap_or_else(|| cfg_dir.to_path_buf());
+    let mut errors = Vec::new();
+    // (directory, entry index, captures) of every workspace an entry matches.
+    let mut matched: Vec<(String, usize, dirs::Captures)> = Vec::new();
+    for (i, w) in cfg.workspaces.iter().enumerate() {
+        let tbl = lines.nth("workspace", i);
+        let at = |key: &str| lines.key_line_of(tbl, key);
+        let pat = match dirs::DirPattern::new(&w.dir) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(format!(
+                    "{cfg_name}:{}: workspace `{}`: {e}",
+                    at("dir"),
+                    w.dir
+                ));
+                continue;
+            }
+        };
+        let caps: Vec<&str> = pat.captures().collect();
+        for d in w.path_deps.iter().flatten() {
+            let line = lines.item_line(tbl, "path_deps", d);
+            match dirs::DirPattern::new(d) {
+                Err(e) => errors.push(format!(
+                    "{cfg_name}:{line}: workspace `{}`: path_deps `{d}`: {e}",
+                    w.dir
+                )),
+                Ok(p) => {
+                    for c in p.captures().filter(|c| !caps.contains(c)) {
+                        errors.push(format!(
+                            "{cfg_name}:{line}: workspace `{}`: path_deps `{d}` uses `{{{c}}}`, which its `dir` does not capture",
+                            w.dir
+                        ));
+                    }
+                }
+            }
+        }
+        let hits: Vec<_> = pat
+            .expand(&root)
+            .into_iter()
+            .filter(|(d, _)| root.join(d).join("Cargo.toml").is_file())
+            .collect();
+        if hits.is_empty() && !cfg.allow_unknown_names {
+            errors.push(format!(
+                "{cfg_name}:{}: workspace `{}` matches no directory with a Cargo.toml under {}",
+                at("dir"),
+                w.dir,
+                root.display()
+            ));
+        }
+        for (d, c) in hits {
+            if let Some((_, j, _)) = matched.iter().find(|(m, _, _)| *m == d) {
+                errors.push(format!(
+                    "{cfg_name}:{}: workspace `{d}` matches entries `{}` and `{}`; each workspace may match one",
+                    at("dir"),
+                    cfg.workspaces[*j].dir,
+                    w.dir
+                ));
+                continue;
+            }
+            matched.push((d, i, c));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    if let Some(m) = manifest {
+        let meta = metadata(Some(m))?;
+        let dir = dirs::rel_dir(&root, &canonical(meta.workspace_root.as_std_path())?);
+        let Some(entry) = matched.iter().find(|(d, _, _)| Some(d) == dir.as_ref()) else {
+            return Err(format!(
+                "{}: the workspace at {} matches no `[[workspace]]` entry",
+                cfg_name, meta.workspace_root
+            ));
+        };
+        matched = vec![entry.clone()];
+    }
+    let mut out = Vec::new();
+    for (dir, i, caps) in matched {
+        let meta = metadata(Some(&root.join(&dir).join("Cargo.toml")))?;
+        if canonical(meta.workspace_root.as_std_path())? != canonical(&root.join(&dir))? {
+            return Err(format!(
+                "{cfg_name}: `{dir}` matches workspace `{}` but is not a workspace root (its workspace is {})",
+                cfg.workspaces[i].dir, meta.workspace_root
+            ));
+        }
+        let path_deps = cfg.workspaces[i]
+            .path_deps
+            .as_ref()
+            .map(|l| {
+                l.iter()
+                    .map(|d| dirs::DirPattern::new(d)?.substitute(&caps))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        out.push(Target {
+            meta,
+            dir,
+            path_deps,
+        });
+    }
+    Ok((root, out))
+}
+
+/// Every rule over one workspace, appended to `out`.
+fn check_workspace(
+    t: &Target,
+    cfg: &config::Config,
+    ws_root: &Path,
+    lines: &validate::Lines,
+    cfg_name: &str,
+    strict: bool,
+    out: &mut Outcome,
+) -> Result<(), String> {
+    let meta = &t.meta;
     let rel = |p: &str| -> String {
         Path::new(p)
-            .strip_prefix(&ws_root)
+            .strip_prefix(ws_root)
             .map(|r| r.display().to_string())
             .unwrap_or_else(|_| p.to_string())
     };
-
-    let mut out = Outcome::default();
-    out.warnings.extend(config_warnings);
-    for v in crates::check(&meta, &cfg) {
+    for v in crates::check(meta, cfg, ws_root) {
         let loc = match v.line {
             Some(l) => format!("{}:{l}", rel(&v.manifest)),
             None => rel(&v.manifest),
@@ -114,7 +321,8 @@ pub fn run_with(
         out.violations += 1;
     }
 
-    for v in dirs::check(&meta, &cfg) {
+    let path_deps = dirs::check_path_deps(meta, cfg, ws_root, &t.dir, t.path_deps.as_deref());
+    for v in dirs::check(meta, cfg, ws_root).into_iter().chain(path_deps) {
         out.lines.push(format!(
             "error[{}]: {}: `{}` {}",
             v.kind,
@@ -125,7 +333,7 @@ pub fn run_with(
         out.violations += 1;
     }
 
-    let lint = lints::check(&meta, &cfg, VERUS_FEATURE)?;
+    let lint = lints::check(meta, cfg, ws_root, VERUS_FEATURE)?;
     for v in lint.violations {
         let loc = if v.line > 0 {
             format!("{}:{}", v.file, v.line)
@@ -140,13 +348,6 @@ pub fn run_with(
         out.parse_failure(e, strict);
     }
 
-    if !VERUS_FEATURE && cfg.crates.iter().any(|r| r.verus) {
-        out.warnings.push(
-            "`verus = true` is set but cargo-strata was built without the `verus` feature; \
-             `verus! { }` bodies are not checked (install with `--features verus`)"
-                .to_string(),
-        );
-    }
     let members: std::collections::HashSet<_> = meta.workspace_members.iter().collect();
     for pkg in meta.packages.iter().filter(|p| members.contains(&p.id)) {
         let rules: Vec<&config::CrateRule> = cfg
@@ -170,7 +371,7 @@ pub fn run_with(
             })
             .map(|t| t.src_path.clone().into())
             .collect();
-        let rep = modules::check_crate(&pkg.name, &roots, &rules, &cfg, VERUS_FEATURE, &ws_root);
+        let rep = modules::check_crate(&pkg.name, &roots, &rules, cfg, VERUS_FEATURE, ws_root);
         for v in rep.violations {
             if v.stale {
                 let line = lines
@@ -247,8 +448,8 @@ pub fn run_with(
             out.errors += 1;
         }
     }
-    surface_check(&meta, &cfg, &ws_root, &lines, &cfg_name, strict, &mut out);
-    Ok(out)
+    surface_check(meta, cfg, ws_root, lines, cfg_name, strict, out);
+    Ok(())
 }
 
 /// `public_modules`: paths from dependent workspace crates into a crate.

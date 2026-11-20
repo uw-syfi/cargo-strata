@@ -977,12 +977,15 @@ pub struct Report {
     pub errors: Vec<String>,
 }
 
+/// Source lints over the members of `meta`; files and directories in the
+/// config and in messages are relative to `root`.
 pub fn check(
     meta: &cargo_metadata::Metadata,
     cfg: &Config,
+    root: &Path,
     verus_feature: bool,
 ) -> Result<Report, String> {
-    let ws_root: PathBuf = meta.workspace_root.clone().into();
+    let ws_root: PathBuf = root.to_path_buf();
     let members: std::collections::HashSet<_> = meta.workspace_members.iter().collect();
     let mut crates = Vec::new();
     let mut files = Vec::new();
