@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Check dev-dependency edges too (default false).
@@ -34,6 +34,20 @@ pub struct Config {
     /// Apply the group axis to dev edges too (default true).
     #[serde(default = "yes")]
     pub group_dev: bool,
+    /// Directory (relative to the config file's directory) that every
+    /// directory and file in this config is relative to. Default: the
+    /// workspace root, or with `[[workspace]]` the config file's directory.
+    pub root: Option<String>,
+    /// Path dependencies that are not workspace members (packages with no
+    /// registry or git source) count as workspace crates for the crate rules:
+    /// they join layers and groups, and `allow` lists judge them. Only edges
+    /// from members are checked (default false).
+    #[serde(default)]
+    pub path_packages: bool,
+    /// The workspaces this config governs. Absent: the one workspace of
+    /// `--manifest-path` (or the current directory).
+    #[serde(default, rename = "workspace")]
+    pub workspaces: Vec<Workspace>,
     /// Every workspace crate (`true`), or every one matching these globs,
     /// must belong to a layer.
     #[serde(default)]
@@ -66,6 +80,20 @@ pub struct Config {
     /// Token patterns and attributes allowed only in listed files.
     #[serde(default, rename = "forbid")]
     pub forbids: Vec<Forbid>,
+}
+
+/// A `[[workspace]]` entry: the workspaces whose root directory matches
+/// `dir`, each checked with this config.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Workspace {
+    /// Directory pattern (relative to `root`) of the workspace roots; a
+    /// `{name}` segment captures that directory's name for `path_deps`.
+    pub dir: String,
+    /// If present, every path dependency of a member lives in the
+    /// workspace's own directory or under one of these directory patterns
+    /// (`{name}` takes the value `dir` captured). `[]`: a closed workspace.
+    pub path_deps: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -258,8 +286,9 @@ fn yes() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Layer {
     pub name: String,
-    /// Crate-name globs belonging to this layer.
-    pub crates: Vec<String>,
+    /// Crate-name globs belonging to this layer. Absent: the crates that
+    /// live under `dir`.
+    pub crates: Option<Vec<String>>,
     pub may_depend_on: Option<Vec<String>>,
     /// Members may not depend on crates matching these globs, on any edge
     /// kind the axis applies to. `layer_exempt`/`group_exempt` suppress it.
@@ -275,8 +304,12 @@ pub struct Layer {
     /// globs are violations.
     #[serde(default)]
     pub external_deny: Vec<String>,
-    /// Directory (relative to the workspace root, `/`-separated) every member
-    /// crate must live in or under. Checked for each crate in this layer/group.
+    /// Directory pattern (relative to `root`, `/`-separated) every member
+    /// crate must live in or under; without `crates`, the members are the
+    /// crates living there. A `{name}` segment splits the entry into one
+    /// instance per captured name: an edge the entry allows by name is
+    /// allowed only between instances that agree on every capture name both
+    /// entries have.
     pub dir: Option<String>,
 }
 
@@ -310,6 +343,11 @@ pub struct CrateRule {
     /// Same, for the group axis.
     #[serde(default)]
     pub group_exempt: Vec<String>,
+    /// Path dependencies (crate-name globs) exempt from the `path_deps` rule
+    /// of this crate's workspace. An exemption that suppresses nothing is
+    /// reported as stale.
+    #[serde(default)]
+    pub path_deps_exempt: Vec<String>,
     /// Parse `verus! { }` bodies for module rules (needs the `verus` feature).
     #[serde(default)]
     pub verus: bool,

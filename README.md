@@ -107,6 +107,40 @@ deny = ["tools::*"]    # every other child; a tool's own subtree stays its own
 error[module]: core/src/tools/b.rs:3: module `tools::b` references `tools::a` (via `super::a::run`): `tools::b` (rule `tools::*`) denies `tools::*`
 ```
 
+### Several workspaces
+
+One config can govern several workspaces of a checkout: a library workspace
+and one workspace per release of the code built on it, say. List them with
+`[[workspace]]`; every directory in the config is then relative to the
+config file's directory (or `root`). A `{name}` segment in a directory
+captures that directory's name, so each domain or version is its own
+instance of a rule:
+
+```toml
+path_packages = true            # judge the library's crates in each version too
+
+[[workspace]]
+dir = "lib"
+path_deps = []                  # closed: no path dependency outside lib/
+
+[[workspace]]
+dir = "versions/{domain}/{version}"
+path_deps = ["lib/sdk", "lib/domains/{domain}"]
+
+[[group]]
+name = "domain"
+dir = "lib/domains/{domain}"    # no `crates`: every crate living there
+may_depend_on = ["sdk", "domain"]
+```
+
+`cargo strata check --config strata.toml` checks every workspace the entries
+match. If `versions/a/v1/lib` depends on `b-dom` from `lib/domains/b`:
+
+```
+error[crate]: versions/a/v1/lib/Cargo.toml:9: `a-v1-lib` -> `b-dom` (normal dependency): group `version` (domain = a, version = v1) may depend on `domain` only where their captures agree, not on `domain` (domain = b)
+error[path-dep]: versions/a/v1/lib/Cargo.toml: `a-v1-lib` has a path dependency on `b-dom` in `lib/domains/b/b-dom`, outside its workspace `versions/a/v1` and the directories its `path_deps` allows
+```
+
 ### CI
 
 ```yaml
@@ -131,12 +165,13 @@ The rest of this file is the reference for every rule and config key.
 
 ## Rules
 
-Three kinds of rule, all from one `strata.toml` at the workspace root:
+Three kinds of rule, all from one `strata.toml` at the workspace root (or one
+config over several workspaces, see [`[[workspace]]`](#workspace)):
 
 1. **Crate rules**: which workspace crates may depend on which (layers,
    groups, allow and deny lists), read from `cargo metadata`. Directory rules
-   sit beside them: where crates live, and which directories their
-   dependencies may reach.
+   sit beside them: where crates live, which directories their dependencies
+   may reach, and where a workspace's path dependencies may point.
 2. **Module rules**: which modules inside a crate may reference which, read
    from `use` trees and `crate::`/`self::`/`super::` paths in the source,
    with names resolved through re-exports, globs and renames.
@@ -191,6 +226,8 @@ All tables reject unknown keys.
 | `skip_cfg_test` | true | Ignore `#[cfg(test)]` modules, fns and uses in module checks |
 | `lint_skip_cfg_test` | false | Source lints skip `#[cfg(test)]` items (by default they see test code) |
 | `unsafe_ratchet` | none | JSON file (workspace-relative) `{crate: allowed unsafe sites}` for `unsafe = "ratchet"` |
+| `root` | workspace root | Directory, relative to the config file's directory, that every directory and file in the config is relative to (and that messages print paths from). With `[[workspace]]`, the default is the config file's directory |
+| `path_packages` | false | Path dependencies that are not workspace members (no registry or git source) count as workspace crates for the crate rules: they join layers and groups (by name or directory), `allow` lists judge them, and `external_allow`/`external_deny` no longer see them. Only edges from members are checked; a path package's own edges are its workspace's business. Unknown-name checks count them |
 
 ### `[[layer]]` and `[[group]]`
 
@@ -199,16 +236,39 @@ example framework/plugin/deploy) checked the same way as layers.
 
 | Key | Meaning |
 | --- | --- |
-| `name`, `crates` | Layer name; crate-name globs (`*`, `?`, `[..]`) |
+| `name`, `crates` | Layer name; crate-name globs (`*`, `?`, `[..]`). Without `crates`, the members are the crates living under `dir` (one of the two is required) |
 | `may_depend_on` | Exact list of layer names this layer may depend on (own layer is not implicit). When absent, layers are ordered lowest first and a crate may depend on its own and lower layers |
 | `deny`, `deny_normal` | Members may not depend on crates matching these globs (`deny_normal`: normal edges only) |
 | `external_allow` | Normal deps on non-workspace crates must match one of these globs (`[]` forbids all) |
 | `external_deny` | Normal deps on non-workspace crates matching these are violations |
-| `dir` | Directory (workspace-relative) every member crate of this layer/group must live in or under (`error[placement]`) |
+| `dir` | Directory pattern (root-relative) every member crate of this layer/group must live in or under (`error[placement]`); without `crates`, membership itself. See below |
 
 Only edges between two crates that both belong to the axis are compared.
 Ordered layers cannot express a matrix (a mediator may use a proposer, a
 driver may not use a mediator); use `may_depend_on` for that.
+
+`dir` is a directory pattern: `/`-separated segments, each a name, a glob that
+matches one directory name (`*`, `?`, `[..]`), or a capture `{name}` that
+matches any one name and binds it (`**` and `..` are configuration errors, as
+is a capture used twice). A crate lives under the pattern if some ancestor of
+its directory, or the directory itself, matches. A crate's directory is its
+manifest's, relative to the root; a crate outside the root lives under no
+pattern, so only `crates` globs can place it on an axis.
+
+Captures split an entry into instances, one per captured value: with
+`dir = "domains/{domain}"`, `domains/a/x` is in instance `domain = a`. An
+edge the entry allows by name (`may_depend_on`, or the order of layers) is
+allowed only if the two crates' instances agree on every capture name both
+entries have. So `may_depend_on = ["domain"]` on that entry lets a domain use
+itself, not another domain, and an entry with
+`dir = "versions/{domain}/{version}"` listing `domain` may use only the
+domain it is named for. Entries without captures agree with everything. An
+entry that has both `crates` and a captured `dir` takes each member's
+instance from where it lives.
+
+With `allow_unknown_names` off, a `dir` without `crates` that holds no crate
+is a configuration error, and two entries that hold one crate (by name or by
+directory) overlap.
 
 ### `[[crate]]`
 
@@ -223,6 +283,7 @@ their rules combine.
 | `deny_reach` | Crates (globs) that must not be reachable through normal edges between workspace crates |
 | `layer_exempt`, `group_exempt` | Grandfathered dependencies exempt from that axis. An exemption that suppresses nothing is reported as stale |
 | `verus` | Parse `verus!` bodies for this crate's module rules and source lints. Honored only when built with `--features verus`; otherwise one warning is printed |
+| `path_deps_exempt` | Path dependencies (crate-name globs) of this crate exempt from its workspace's `path_deps`. An exemption that suppresses nothing is reported as stale (`error[path-dep]`) |
 | `deny_reach_dir` | Directory globs (workspace-relative; a glob covers everything below the directory it matches). No package living there may be reachable from this crate through dependencies (kinds per `check_dev`/`check_build`/`check_optional`), including path dependencies outside the workspace. The report names the chain (`error[reach]`) |
 | `deny_source_dir` | Directory globs this crate's sources may not pull in with `#[path = ".."]` or `include!`/`include_str!`/`include_bytes!` (literal or `concat!(env!("CARGO_MANIFEST_DIR"), ..)` arguments; paths are normalized lexically; dynamic arguments are ignored) (`error[source-reach]`) |
 | `deny_reexport`, `allow_reexport` | A `pub use` (any `pub` visibility) whose path starts with a crate in `deny_reexport` (`-` and `_` equal) may only name leaves listed in `allow_reexport`; a glob always fails; `allow_reexport = ["*"]` lifts the rule (`error[reexport]`). The leaf is the original name, so `X as Y` is checked as `X`. With `resolve`, a path that reaches a denied crate through a local alias (`use denied as d; pub use d::X`), a module that re-exports it, or a workspace dependency that re-exports it is checked the same way |
@@ -287,6 +348,29 @@ path = "memory"
 depends_on = ["util"]
 deny = ["engine"]
 ```
+
+### `[[workspace]]`
+
+With one or more `[[workspace]]` entries, the config governs every workspace
+whose root directory matches an entry's `dir`, and each is checked with all
+of the config's rules, as if `cargo strata check --manifest-path` ran on it.
+The root defaults to the config file's directory. With `--manifest-path`,
+only that workspace is checked; it must match an entry, and names that match
+nothing there are not reported (they may match in another workspace; the
+full run judges them).
+
+| Key | Meaning |
+| --- | --- |
+| `dir` | Directory pattern (root-relative, as for a layer's `dir`) of workspace roots: each matching directory that holds a `Cargo.toml` is checked. It must be a workspace root. A `{name}` segment binds that name for `path_deps` |
+| `path_deps` | If present, every path dependency of a member (any kind, whatever `check_dev` says: the manifests must name nothing outside) lives in the workspace's own directory or under one of these directory patterns, with each `{name}` replaced by the value `dir` captured (`error[path-dep]`). `[]` closes the workspace. A crate's `path_deps_exempt` names the exceptions |
+
+Configuration errors, each with its line: a malformed pattern, a `path_deps`
+capture its `dir` does not bind, an entry that matches no workspace (unless
+`allow_unknown_names`), and a workspace two entries match.
+
+Each workspace's rules see its own `cargo metadata`, so a crate rule's glob
+applies in every workspace whose members it matches. Unknown-name checks run
+over the crates of all of them.
 
 ### Public surface
 
@@ -529,7 +613,8 @@ cargo test --features verus
 cargo clippy --all-targets [--features verus]
 ```
 
-Rule evaluation is pure: `crates::evaluate(config, workspace, edges)` and
+Rule evaluation is pure: `crates::evaluate(config, workspace, edges)`
+(`evaluate_local` with directories and path packages), `dirs::path_deps(...)` and
 `modules::evaluate(...)`, `dirs::evaluate(...)` and `lints::evaluate(...)` take data in and return violations, for direct
 testing without `cargo metadata` or the file system.
 
@@ -578,6 +663,13 @@ testing without `cargo metadata` or the file system.
   re-exports, raw identifiers, nested modules, lifetimes; specificity,
   ambiguity and malformed patterns; and every pair of rules over ten
   patterns against an oracle written from this document.
+* `tests/prop_dir_axes.rs`: directory patterns against a segment-wise
+  oracle (`contains`, `matches`, `substitute`), and layers and groups held by
+  captured directories (members and path packages, explicit and ordered) against
+  an oracle written from this document. `tests/workspaces.rs`: several
+  workspaces under one config end to end: domain and version isolation,
+  examples, closed workspaces and exemptions, `--manifest-path`, `root`, and
+  each configuration error with its line.
 * `tests/corpus_regressions.rs`: bugs found on the external workspaces,
   minimized (raw-identifier modules, use-tree line numbers, renamed
   dependencies). `tests/bad_config.rs`: each configuration error names its

@@ -64,7 +64,7 @@ fn k(c: &str, f: &str, t: &str, kind: &str) -> Key {
 }
 
 fn member(axis: &[Layer], name: &str) -> Option<usize> {
-    (0..axis.len()).find(|&i| axis[i].crates.iter().any(|p| g(p, name)))
+    (0..axis.len()).find(|&i| axis[i].crates.iter().flatten().any(|p| g(p, name)))
 }
 
 /// The axis verdict for an internal edge, as a bool, before exemptions.
@@ -300,7 +300,7 @@ fn axis(prefix: &'static str) -> impl Strategy<Value = Vec<Layer>> {
                 .map(
                     |(i, (crates, deps, deny, deny_normal, ext_allow, ext_deny))| Layer {
                         name: format!("{prefix}{i}"),
-                        crates,
+                        crates: Some(crates),
                         may_depend_on: if use_deps {
                             deps.map(|d| d.iter().map(|j| format!("{prefix}{j}")).collect())
                         } else {
@@ -545,7 +545,7 @@ proptest! {
     fn ordered_layers_are_transitive(n in 2usize..6, assign in prop::collection::vec(0usize..6, 8)) {
         let layers: Vec<Layer> = (0..n).map(|i| Layer {
             name: format!("L{i}"),
-            crates: WS.iter().enumerate().filter(|(j, _)| assign[*j] % n == i).map(|(_, w)| w.to_string()).collect(),
+            crates: Some(WS.iter().enumerate().filter(|(j, _)| assign[*j] % n == i).map(|(_, w)| w.to_string()).collect()),
             may_depend_on: None, deny: vec![], deny_normal: vec![], external_allow: None, external_deny: vec![], dir: None,
         }).collect();
         let cfg = Config { check_build: true, check_optional: true, skip_cfg_test: true, group_dev: true, layers, ..Config::default() };
@@ -578,7 +578,7 @@ fn axis_toml(kind: &str, axis: &[Layer]) -> String {
         t += &format!(
             "[[{kind}]]\nname = {:?}\ncrates = {}\n",
             l.name,
-            toml_list(&l.crates)
+            toml_list(l.crates.as_deref().unwrap_or_default())
         );
         if let Some(m) = &l.may_depend_on {
             // Names of layers that do not exist are config errors; they
@@ -658,7 +658,7 @@ mod end_to_end {
             // (the pure oracle keeps "first wins").
             for axis in [&c.layers, &c.groups] {
                 for w in WS {
-                    prop_assume!(axis.iter().filter(|l| l.crates.iter().any(|g| cargo_strata::config::glob_match(g, w))).count() <= 1);
+                    prop_assume!(axis.iter().filter(|l| l.crates.iter().flatten().any(|g| cargo_strata::config::glob_match(g, w))).count() <= 1);
                 }
             }
             let (cfg, ws, edges) = c.build();

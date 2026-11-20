@@ -2,8 +2,9 @@
 //! overlapping layers or groups, impossible `may_depend_on`. Every message
 //! starts with `file:line:`.
 
+use crate::axis::holds;
 use crate::config::{Config, Layer, glob_match};
-use std::collections::BTreeSet;
+use crate::dirs::DirPattern;
 
 /// Where each table and key sits in the config text (serde drops spans).
 pub struct Lines<'a> {
@@ -51,8 +52,28 @@ impl<'a> Lines<'a> {
             + 1
     }
 
+    /// Table index of the `i`-th `[[header]]` table (0 when absent).
+    pub fn nth(&self, header: &str, i: usize) -> usize {
+        (0..self.tables.len())
+            .filter(|&t| self.tables[t].0 == header)
+            .nth(i)
+            .unwrap_or(0)
+    }
+
+    /// 1-based line of `key = ...` in table `tbl`, else its header line
+    /// (1 when the config has no tables).
+    pub fn key_line_of(&self, tbl: usize, key: &str) -> usize {
+        if self.tables.is_empty() {
+            return 1;
+        }
+        self.key_line(tbl, key)
+    }
+
     /// Line of the quoted `item` in the array `key` of `tbl` (else the key line).
     pub fn item_line(&self, tbl: usize, key: &str, item: &str) -> usize {
+        if self.tables.is_empty() {
+            return 1;
+        }
         let k = self.key_line(tbl, key);
         let end = self.end(tbl);
         let needle = format!("\"{item}\"");
@@ -103,7 +124,7 @@ fn axis(
     header: &str,
     what: &str,
     layers: &[Layer],
-    ws: &BTreeSet<String>,
+    ws: &[(String, Option<String>)],
 ) {
     let tbl_of = |l: &Layer| lines.find(header, "name", &l.name).unwrap_or(0);
     let at = |t: usize, key: &str, item: &str| lines.item_line(t, key, item);
@@ -127,13 +148,45 @@ fn axis(
         .collect();
     let tbl = |i: usize| tables.get(i).copied().unwrap_or_else(|| tbl_of(&layers[i]));
     for (i, l) in layers.iter().enumerate() {
-        for g in l.crates.iter().filter(|_| !unknown_ok) {
-            if !ws.iter().any(|n| glob_match(g, n)) {
-                out.push(format!(
-                    "{f}:{}: {what} `{}`: `{g}` matches no workspace crate",
-                    at(tbl(i), "crates", g),
-                    l.name
-                ));
+        if let Some(d) = &l.dir
+            && let Err(e) = DirPattern::new(d)
+        {
+            out.push(format!(
+                "{f}:{}: {what} `{}`: `dir = \"{d}\"` is not a directory pattern: {e}",
+                lines.key_line(tbl(i), "dir"),
+                l.name
+            ));
+            continue;
+        }
+        match (&l.crates, &l.dir) {
+            (None, None) => out.push(format!(
+                "{f}:{}: {what} `{}`: needs `crates`, `dir` or both",
+                lines.key_line(tbl(i), "name"),
+                l.name
+            )),
+            (Some(globs), _) => {
+                for g in globs.iter().filter(|_| !unknown_ok) {
+                    if !ws.iter().any(|(n, _)| glob_match(g, n)) {
+                        out.push(format!(
+                            "{f}:{}: {what} `{}`: `{g}` matches no workspace crate",
+                            at(tbl(i), "crates", g),
+                            l.name
+                        ));
+                    }
+                }
+            }
+            (None, Some(d)) => {
+                if !unknown_ok
+                    && !ws
+                        .iter()
+                        .any(|(n, dir)| holds(l, n, dir.as_deref()).is_some())
+                {
+                    out.push(format!(
+                        "{f}:{}: {what} `{}`: `dir = \"{d}\"` holds no workspace crate",
+                        lines.key_line(tbl(i), "dir"),
+                        l.name
+                    ));
+                }
             }
         }
         for dep in l.may_depend_on.iter().flatten() {
@@ -147,21 +200,27 @@ fn axis(
         }
     }
     // A crate in two layers/groups: the first would silently win.
-    for n in ws {
+    let key_of = |l: &Layer| if l.crates.is_some() { "crates" } else { "dir" };
+    for (n, dir) in ws {
         let hits: Vec<usize> = (0..layers.len())
-            .filter(|&i| layers[i].crates.iter().any(|g| glob_match(g, n)))
+            .filter(|&i| holds(&layers[i], n, dir.as_deref()).is_some())
             .collect();
         if hits.len() > 1 {
             let (a, b) = (hits[0], hits[1]);
-            let g = layers[b].crates.iter().find(|g| glob_match(g, n)).unwrap();
-            out.push(format!(
-                "{f}:{}: crate `{n}` is in {what}s `{}` (line {}) and `{}`: overlapping {what}s; \
+            let line = match layers[b].crates.iter().flatten().find(|g| glob_match(g, n)) {
+                Some(g) => at(tbl(b), "crates", g),
+                None => lines.key_line(tbl(b), "dir"),
+            };
+            let msg = format!(
+                "{f}:{line}: crate `{n}` is in {what}s `{}` (line {}) and `{}`: overlapping {what}s; \
                  each crate may be in one",
-                at(tbl(b), "crates", g),
                 layers[a].name,
-                lines.key_line(tbl(a), "crates"),
+                lines.key_line(tbl(a), key_of(&layers[a])),
                 layers[b].name
-            ));
+            );
+            if !out.contains(&msg) {
+                out.push(msg);
+            }
         }
     }
     // Cycle through may_depend_on (self edges are fine).
@@ -223,11 +282,12 @@ fn axis(
 }
 
 /// All configuration errors for `cfg` (parsed from `text`) against the
-/// workspace crate names `ws`. `f` is the config file name for messages.
+/// workspace crates `ws` (name, directory relative to the root). `f` is the
+/// config file name for messages.
 pub fn validate(
     cfg: &Config,
     text: &str,
-    ws: &BTreeSet<String>,
+    ws: &[(String, Option<String>)],
     f: &str,
 ) -> (Vec<String>, Vec<String>) {
     let lines = Lines::new(text);
@@ -261,7 +321,7 @@ pub fn validate(
         .collect();
     for (i, r) in cfg.crates.iter().enumerate() {
         let t = crate_tables.get(i).copied().unwrap_or(0);
-        if !ok && !ws.iter().any(|n| glob_match(&r.name, n)) {
+        if !ok && !ws.iter().any(|(n, _)| glob_match(&r.name, n)) {
             out.push(format!(
                 "{f}:{}: `[[crate]] name = \"{}\"` matches no workspace crate",
                 lines.key_line(t, "name"),
@@ -273,7 +333,7 @@ pub fn validate(
             ("allow_dev", &r.allow_dev[..]),
         ] {
             for d in list {
-                if !ok && !is_glob(d) && !ws.contains(d) {
+                if !ok && !is_glob(d) && !ws.iter().any(|(n, _)| n == d) {
                     out.push(format!(
                         "{f}:{}: crate `{}`: `{key}` names `{d}`, which is not a workspace crate",
                         lines.item_line(t, key, d),

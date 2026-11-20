@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Rules
+
+* Several workspaces under one config: `[[workspace]]` entries (a
+  directory pattern `dir` each) list the workspaces it governs, and
+  `cargo strata check` checks every one, or only `--manifest-path`'s. A
+  checkout with one workspace per release or per domain needed a copy of the
+  config, or a script, per workspace.
+* `root`: the directory every path in the config is relative to, relative to
+  the config file. Default: the workspace root, or with `[[workspace]]` the
+  config file's directory.
+* Layers and groups by directory: `crates` is optional; without it the
+  members are the crates living under `dir`. Crates with the same name shape
+  in different folders (an example and a domain) no longer need a list of
+  prefixes, and a new crate in the folder joins without a config edit.
+* `{name}` captures in a layer's or group's `dir`: each captured value is an
+  instance, and an edge the entry allows by name is allowed only between
+  instances that agree on every shared capture. `dir = "domains/{domain}"`
+  with `may_depend_on = ["domain"]` keeps each domain to itself; a version
+  under `versions/{domain}/{version}` may use only its own domain.
+* `path_packages = true`: path dependencies outside the workspace join
+  layers and groups and `allow` lists, so a workspace that builds on another
+  one's crates is held to the same rules.
+* `path_deps` on `[[workspace]]`: every path dependency of a member lives in
+  the workspace or under the listed directories (`{name}` from `dir`); `[]`
+  closes the workspace. `path_deps_exempt` on `[[crate]]` names exceptions
+  and is reported when stale (`error[path-dep]`).
+
+### Breaking
+
+None for existing configs: without the new keys, crates, directories and
+messages are as before. A `dir` is now a pattern, so a `dir` holding `*`,
+`?`, `[`, `{` or `..` is read as one (or rejected). New configuration errors,
+each naming its line: a layer or group with neither `crates` nor `dir`, a
+malformed `dir`, a `dir` without `crates` that holds no crate, and the
+`[[workspace]]` errors in the README.
+
+### API
+
+* `config::Layer::crates` is `Option<Vec<String>>`; `Config` gains `root`,
+  `path_packages` and `workspaces`, `CrateRule` gains `path_deps_exempt`,
+  and `Config` is `Clone`.
+* `crates::check`, `dirs::check` and `lints::check` take the root.
+  `crates::evaluate_local` and `crates::locals` (with `Local`),
+  `dirs::DirPattern`, `dirs::path_deps` and `dirs::check_path_deps`, and the
+  `axis` module (`holds`, `member_of`, `agree`). `validate::validate` takes
+  the crates as (name, directory) pairs.
+
+### Testing
+
+* `tests/prop_dir_axes.rs`: directory patterns and captured axes against
+  oracles. `tests/workspaces.rs`: several workspaces end to end.
+
 ## 0.4.0
 
 ### Rules
