@@ -145,7 +145,7 @@ error[path-dep]: versions/a/v1/lib/Cargo.toml: `a-v1-lib` has a path dependency 
 
 ```yaml
 - uses: dtolnay/rust-toolchain@stable
-- run: cargo install cargo-strata --version 0.5.0 --locked
+- run: cargo install cargo-strata --version 0.5.1 --locked
 - run: cargo strata check
 ```
 
