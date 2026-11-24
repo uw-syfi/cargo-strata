@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+
+* `check` reads each workspace with `cargo metadata --no-deps`, and the local
+  packages its members reach by path from those packages' own workspaces,
+  instead of resolving the registry graph. The rules read declared
+  dependencies only, so verdicts are unchanged; a large workspace reads in
+  0.4 s instead of 9 s. Only `check_optional = false`, which asks the resolve
+  graph which optional dependencies are switched on, and `init` read in full,
+  as does a workspace with a path package cargo reads only through its
+  dependent (one inside another workspace's directory but not its member).
+
 ## 0.5.0
 
 ### Rules

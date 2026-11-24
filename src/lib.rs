@@ -5,13 +5,13 @@ pub mod dirs;
 pub mod facts;
 pub mod init;
 pub mod lints;
+pub mod metadata;
 pub mod modules;
 pub mod resolve;
 pub mod scan;
 pub mod surface;
 pub mod validate;
 
-use cargo_metadata::MetadataCommand;
 use std::path::{Path, PathBuf};
 
 pub const VERUS_FEATURE: bool = cfg!(feature = "verus");
@@ -67,13 +67,18 @@ struct Target {
     path_deps: Option<Vec<dirs::DirPattern>>,
 }
 
-fn metadata(manifest: Option<&Path>) -> Result<cargo_metadata::Metadata, String> {
-    let mut cmd = MetadataCommand::new();
-    if let Some(m) = manifest {
-        cmd.manifest_path(m);
+/// What the rules read of a workspace: its declared dependencies, unless
+/// `check_optional = false` asks the resolve graph which are switched on.
+fn read(
+    reader: &mut metadata::Reader,
+    cfg: &config::Config,
+    manifest: Option<&Path>,
+) -> Result<cargo_metadata::Metadata, String> {
+    if cfg.check_optional {
+        reader.declared(manifest)
+    } else {
+        metadata::full(manifest)
     }
-    cmd.exec()
-        .map_err(|e| format!("cargo metadata failed: {e}"))
 }
 
 fn canonical(p: &Path) -> Result<PathBuf, String> {
@@ -90,15 +95,12 @@ pub fn run_with(
     config_path: Option<&Path>,
     strict: bool,
 ) -> Result<Outcome, String> {
-    let mut found = None;
     let cfg_path = match config_path {
         Some(p) => p.to_path_buf(),
-        None => {
-            let meta = metadata(manifest)?;
-            let p = meta.workspace_root.as_std_path().join("strata.toml");
-            found = Some(meta);
-            p
-        }
+        None => metadata::members(manifest)?
+            .workspace_root
+            .as_std_path()
+            .join("strata.toml"),
     };
     let text = std::fs::read_to_string(&cfg_path)
         .map_err(|e| format!("cannot read {}: {e}", cfg_path.display()))?;
@@ -110,7 +112,7 @@ pub fn run_with(
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     })?;
-    let (root, targets) = targets(&cfg, &cfg_dir, &lines, &cfg_name, manifest, found)?;
+    let (root, targets) = targets(&cfg, &cfg_dir, &lines, &cfg_name, manifest)?;
 
     let mut known: Vec<(String, Option<String>)> = Vec::new();
     for t in &targets {
@@ -155,25 +157,22 @@ fn targets(
     lines: &validate::Lines,
     cfg_name: &str,
     manifest: Option<&Path>,
-    found: Option<cargo_metadata::Metadata>,
 ) -> Result<(PathBuf, Vec<Target>), String> {
+    let mut reader = metadata::Reader::default();
     let explicit_root = cfg
         .root
         .as_ref()
         .map(|r| canonical(&cfg_dir.join(r)))
         .transpose()?;
     if cfg.workspaces.is_empty() {
-        let mut meta = match found {
-            Some(m) => m,
-            None => metadata(manifest)?,
-        };
+        let mut meta = read(&mut reader, cfg, manifest)?;
         // Paths are compared with the root as cargo prints them; an explicit
         // root is canonical, so read the workspace through its canonical path.
         let root = match explicit_root {
             Some(r) => {
                 let ws = canonical(meta.workspace_root.as_std_path())?;
                 if ws != meta.workspace_root.as_std_path() {
-                    meta = metadata(Some(&ws.join("Cargo.toml")))?;
+                    meta = read(&mut reader, cfg, Some(&ws.join("Cargo.toml")))?;
                 }
                 r
             }
@@ -255,7 +254,7 @@ fn targets(
         return Err(errors.join("\n"));
     }
     if let Some(m) = manifest {
-        let meta = metadata(Some(m))?;
+        let meta = metadata::members(Some(m))?;
         let dir = dirs::rel_dir(&root, &canonical(meta.workspace_root.as_std_path())?);
         let Some(entry) = matched.iter().find(|(d, _, _)| Some(d) == dir.as_ref()) else {
             return Err(format!(
@@ -267,7 +266,7 @@ fn targets(
     }
     let mut out = Vec::new();
     for (dir, i, caps) in matched {
-        let meta = metadata(Some(&root.join(&dir).join("Cargo.toml")))?;
+        let meta = read(&mut reader, cfg, Some(&root.join(&dir).join("Cargo.toml")))?;
         if canonical(meta.workspace_root.as_std_path())? != canonical(&root.join(&dir))? {
             return Err(format!(
                 "{cfg_name}: `{dir}` matches workspace `{}` but is not a workspace root (its workspace is {})",
@@ -590,12 +589,6 @@ fn surface_check(
 
 /// Config text describing the workspace as it is now (`cargo strata init`).
 pub fn init(manifest: Option<&Path>, verus: bool) -> Result<(String, Vec<String>), String> {
-    let mut cmd = MetadataCommand::new();
-    if let Some(m) = manifest {
-        cmd.manifest_path(m);
-    }
-    let meta = cmd
-        .exec()
-        .map_err(|e| format!("cargo metadata failed: {e}"))?;
+    let meta = metadata::full(manifest)?;
     Ok(init::generate(&meta, verus, VERUS_FEATURE))
 }
